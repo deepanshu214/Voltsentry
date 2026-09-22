@@ -73,11 +73,22 @@ cd dashboard && npm run dev       # http://localhost:3000
 
 ## Dashboard
 
-- **`/`** — a scroll-driven story landing that explains the product section by section,
-  ending in a CTA into the live NOC console.
-- **NOC console** — station grid, live fleet power chart, transformer-load gauge, threat
-  timeline, and one-click forensic JSON export. Runs against a recorded fixture
-  (`Demo Replay Mode`) or a live proxy feed (`Live Charger Stream`).
+- **Landing hero** — procedural 3D WebGL scene (zero media files): a faceted
+  icosahedron security shield surrounding an industrial reactor core, 6 EV charging
+  nodes with animated energy-flow particles, and red threat particles that flash green
+  on shield interception. Cursor parallax, click-to-discharge shockwaves.
+- **NOC console** — SCADA-style command center with station grid, live fleet power
+  chart, transformer-load gauge, threat timeline, grid frequency widget, and DEFCON
+  status badge. Supports dynamic fleet scaling from 4–48 bays with synthetic
+  telemetry for stations beyond the live backend (always badged as SIM).
+- **3D digital twin** — WebGL charger bays that auto-layout into single or dual rows
+  based on fleet size, with camera auto-framing.
+- **Network topology** — scalable fleet graph with hub-and-spoke, corridor-mesh, and
+  microgrid-ring layouts. CSS-animated power-flow lines and a slide-over drawer for
+  per-station telemetry and red-team injection.
+- **Login** — adaptive two-column security gate with holographic badge scanner,
+  procedural Web Audio cues (scan/grant/deny), clearance ladder, and per-field
+  validation.
 - **`/globe`** — a 3D interactive globe of real EV charging hubs from
   [OpenChargeMap](https://openchargemap.org). Drag to orbit, scroll to zoom, hover a
   node for its power profile.
@@ -105,6 +116,7 @@ network, add a free key:
 | `R3_OSCILLATION` | ≥ 6 start/stop transitions fleet-wide in a 10 s window |
 | `R4_SESSION_UNIQUE` | a second handshake for a station that already has a live socket |
 | `R5_TXN_INTEGRITY` | a `MeterValues.transactionId` that is unknown or owned by another station |
+| `R6_FIRMWARE_URI` | `UpdateFirmware` with a non-HTTPS or suspicious URI |
 
 On a forged-data rule (R2/R5) the proxy drops the frame, sends
 `ChangeAvailability{Inoperative}` downstream, and closes the socket (`4001`) on the ack.
@@ -151,3 +163,24 @@ tests/        pytest suites
 ```
 
 Folder ownership and contribution rules: see [`AGENTS.md`](AGENTS.md).
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+| :--- | :--- |
+| Proxy & detection | Python 3.11, asyncio, websockets, scikit-learn |
+| Dashboard | Next.js 14 (App Router), TypeScript, Tailwind CSS |
+| 3D / WebGL | Three.js, @react-three/fiber, @react-three/drei |
+| Audio | Web Audio API (procedural synthesis, zero audio files) |
+| Protocol | OCPP 1.6-J over WebSocket (JSON) |
+
+---
+
+## Hackathon
+
+Built for **Code2Create** — a 48-hour hackathon by ACM-VIT, Vellore.
+500+ idea submissions → 200+ teams shortlisted → top 18 after two review rounds.
+
+**Team:** Deepanshu Agarwal · Shubham Krishna · Krish Jairath
