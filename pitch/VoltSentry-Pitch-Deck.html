@@ -112,12 +112,13 @@
   <!-- 3 -->
   <section class="slide">
     <div class="kicker">Threat model</div>
-    <h2>Four attack vectors on the charging control plane.</h2>
+    <h2>Five attack vectors on the charging control plane.</h2>
     <div class="cols-3">
       <div class="card"><h3><span class="dot d-crit"></span>Meter spoofing</h3><p>Under-report delivered energy so a session bills near zero while real power flows. Billing fraud at fleet scale.</p></div>
       <div class="card"><h3><span class="dot d-crit"></span>Grid oscillation</h3><p>Synchronised rapid start/stop of high-power chargers across a cluster to swing local load and trip a distribution transformer.</p></div>
       <div class="card"><h3><span class="dot d-warn"></span>Session shadowing</h3><p>A parallel WebSocket handshake reusing a live <span class="mono">chargePointId</span> to displace or seize a legitimate charger's session.</p></div>
       <div class="card"><h3><span class="dot d-warn"></span>Subtle data drift</h3><p>Slow compounding falsification that stays inside every hard threshold — invisible to any rule engine.</p></div>
+      <div class="card"><h3><span class="dot d-warn"></span>Card cloning</h3><p>A copied RFID card charging two cars at once, often at two different sites — invisible to any single site.</p></div>
     </div>
     <div class="foot"><span>03</span><span>VOLTSENTRY</span></div>
   </section>
@@ -167,6 +168,56 @@
 
   <!-- 6 -->
   <section class="slide">
+    <div class="kicker">Real units</div>
+    <h2>Every figure is in its <span class="em">real unit</span>, read off the wire.</h2>
+    <div class="flow">
+      <span class="node">11 kV feeder</span><span class="arrow">──▶</span>
+      <span class="node hl">1250 kVA transformer<br>11 kV / 433 V</span><span class="arrow">──▶</span>
+      <span class="node">415 V three-phase bus<br>= 240 V line-to-neutral</span><span class="arrow">──▶</span>
+      <span class="node">8 × 120 kW DC chargers<br>~700 V · ~170 A to the car</span>
+    </div>
+    <div class="cols" style="margin-top:1.6rem">
+      <ul>
+        <li>A house takes <b>one phase, ~230 V</b>. A fast charger needs all three: 415 V between lines, 240 V from each line to neutral.</li>
+        <li>Transformers are rated in <b>kVA</b>, not volts: kVA = kW ÷ power factor. Eight bays draw 1022 kVA, so the site needs <b>1250 kVA</b>. (Our hackathon build assumed 500 kVA, which eight chargers would overload 2×.)</li>
+        <li>The proxy reads units off the wire: a charger sending <span class="mono">120000 W</span> is 120 kW, not 120,000.</li>
+      </ul>
+      <div class="card">
+        <h3><span class="dot d-active"></span>Measured on the live site</h3>
+        <p class="mono" style="font-size:.88rem;line-height:1.75">load 1022 kVA / 1250 kVA (81.8 %)<br>bus 420.7 V L-L · 243 V L-N<br>line current 1403 A per phase<br>frequency 50.00 Hz (band 49.90–50.05)</p>
+        <p style="margin-top:.8rem">New rule <span class="mono">R7_ELECTRICAL</span>: reported power must equal the meter's own V × I.</p>
+      </div>
+    </div>
+    <div class="foot"><span>06</span><span>VOLTSENTRY</span></div>
+  </section>
+
+  <!-- 7 -->
+  <section class="slide">
+    <div class="kicker">Multi-site network</div>
+    <h2>One VoltSentry node per site, <span class="em">joined into a network</span>.</h2>
+    <div class="flow">
+      <span class="node">Vellore site<br>VS-VELLORE · 8 bays</span>
+      <span class="arrow">──signed──▶</span>
+      <span class="node hl">federation hub<br>threat-intel relay</span>
+      <span class="arrow">◀──signed──</span>
+      <span class="node">Chennai site<br>VS-CHENNAI · 6 bays</span>
+    </div>
+    <div class="cols" style="margin-top:1.6rem">
+      <ul>
+        <li>Each node protects its own chargers. If the hub or the WAN goes down, detection and quarantine carry on locally.</li>
+        <li>Every message is HMAC-SHA256 signed with that node's own key, with replay protection; TLS optional. Forged, impersonated and replayed nodes are refused.</li>
+        <li class="act">A quarantine at one site becomes a blocklist entry every site enforces within a second.</li>
+      </ul>
+      <div class="card">
+        <h3><span class="dot d-crit"></span>What no single site can see</h3>
+        <p>One RFID card can only charge one car at a time. Sites share live sessions as salted hashes (never the card number), so a Vellore card used in Chennai while still charging in Vellore is blocked: <span class="mono">R8_TAG_CLONE</span> there, <span class="mono">R9_THREAT_INTEL</span> back home.</p>
+      </div>
+    </div>
+    <div class="foot"><span>07</span><span>VOLTSENTRY</span></div>
+  </section>
+
+  <!-- 8 -->
+  <section class="slide">
     <div class="kicker">Detection engine</div>
     <h2>Tier-1 catches the loud attacks at <span class="em">zero latency</span>.</h2>
     <table>
@@ -176,12 +227,15 @@
       <tr><td class="rid">R3_OSCILLATION</td><td>sliding window</td><td class="q">≥ 6 start/stop transitions fleet-wide in 10 s</td><td class="q">log</td></tr>
       <tr><td class="rid">R4_SESSION_UNIQUE</td><td>connection registry</td><td class="q">second handshake for a cpid with a live session</td><td class="q">reject at handshake</td></tr>
       <tr><td class="rid">R5_TXN_INTEGRITY</td><td>transaction map</td><td class="q">MeterValues.transactionId unknown or owned by another cpid</td><td class="q">quarantine</td></tr>
-      <tr><td class="rid">R6_METER_FRAUD</td><td>energy-residual rate</td><td class="q">reported energy register pulling away from reported power faster than an honest session ever does</td><td class="q">quarantine</td></tr>
+      <tr><td class="rid">R6_METER_FRAUD</td><td>energy-residual rate</td><td class="q">energy register pulling away from reported power</td><td class="q">quarantine</td></tr>
+      <tr><td class="rid">R7_ELECTRICAL</td><td>meter consistency</td><td class="q">reported power ≠ reported DC volts × amps</td><td class="q">quarantine</td></tr>
+      <tr><td class="rid">R8_TAG_CLONE</td><td>card registry</td><td class="q">RFID card already charging here or at another site</td><td class="q">block card</td></tr>
+      <tr><td class="rid">R9_THREAT_INTEL</td><td>federation</td><td class="q">card or charger another site reported</td><td class="q">block / refuse</td></tr>
     </table>
-    <div class="foot"><span>06</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>08</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 7 -->
+  <!-- 9 -->
   <section class="slide">
     <div class="kicker">Detection engine</div>
     <h2>Tier-2 catches the one attack <span class="em">a rule cannot</span>.</h2>
@@ -198,26 +252,27 @@
         <p style="margin-top:.9rem"><span class="mono">IsolationForest(n_estimators=100, contamination=0.02, random_state=42)</span>, score normalisation pinned at fit time. Alert on <span class="mono">score &gt; 0.65</span>. Samples 1–2 of a session are not scored.</p>
       </div>
     </div>
-    <div class="foot"><span>07</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>09</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 8 -->
+  <!-- 10 -->
   <section class="slide">
     <div class="kicker">Live demo · 4 minutes</div>
-    <h2>Four keystrokes. Four detections.</h2>
+    <h2>Five keystrokes. Five detections.</h2>
     <table>
       <tr><th>Key</th><th>Attack</th><th>What the judge sees</th><th>Caught by</th></tr>
-      <tr><td class="q">1</td><td>meter_spoof</td><td class="q">CP-03 reports 5 kW while drawing ~120 kW → energy residual climbs → red, frame dropped, station quarantined, alert</td><td class="rid">R6 + Tier-2</td></tr>
+      <tr><td class="q">1</td><td>meter_spoof</td><td class="q">CP-03 reports 5 kW but its own meter says 718 V × 167 A = 120 kW → quarantined on the first frame</td><td class="rid">R7 (+R6, ML)</td></tr>
       <tr><td class="q">2</td><td>fleet_oscillate</td><td class="q">1 Hz start/stop across the fleet → transformer gauge swings → fleet-wide badge</td><td class="rid">R3</td></tr>
       <tr><td class="q">3</td><td>session_shadow</td><td class="q">duplicate handshake on a live cpid → shadow socket refused at the handshake</td><td class="rid">R4</td></tr>
-      <tr><td class="q">4</td><td>subtle_drift</td><td class="q">−2%/tick compounding under-report → <b>no Tier-1 rule fires</b> → Risk Index rises past 0.65, amber badge</td><td class="rid">Tier-2 only</td></tr>
+      <tr><td class="q">4</td><td>subtle_drift</td><td class="q">−2%/tick under-report, every value consistent → <b>no rule fires</b> → Risk Index past 0.65 ~17 s in; R6 ~25 s later</td><td class="rid">Tier-2 first</td></tr>
+      <tr><td class="q">5</td><td>tag_clone</td><td class="q">a Chennai bay presents a card still charging in Vellore → Authorize answered Blocked; Vellore alerted</td><td class="rid">R8 + R9</td></tr>
       <tr><td class="q">r</td><td>reset</td><td class="q">clears quarantine, reconnects the fleet clean — ready for the next attack</td><td>—</td></tr>
     </table>
     <p class="lede" style="font-size:1.1rem;margin-top:1.4rem">The <span class="mono">subtle_drift</span> beat is the pitch: the one attack a rule engine structurally cannot catch, and the reason Tier-2 exists.</p>
-    <div class="foot"><span>08</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>10</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 9 -->
+  <!-- 11 -->
   <section class="slide">
     <div class="kicker">Credibility</div>
     <h2>What is real, and what is simulated.</h2>
@@ -227,7 +282,9 @@
         <ul>
           <li>OCPP 1.6-J wire format, array framing, CALL/CALLRESULT correlation</li>
           <li>Per-station session FSM and transaction registry</li>
-          <li>All detection logic — Tier-1 rules R1–R6, Tier-2 Isolation Forest + CUSUM maths</li>
+          <li>All detection logic — Tier-1 rules R1–R9, Tier-2 Isolation Forest + CUSUM maths</li>
+          <li>Electrical units read off the wire (W/kW, Wh/kWh, V, A, Hz) and the site model in kVA</li>
+          <li>Multi-site federation: signed node links, shared indicators, cross-site card-clone detection</li>
           <li>Active quarantine: ChangeAvailability downstream, socket close 4001, un-quarantine on reconnect</li>
           <li>Forensic JSON logging and the live NOC dashboard</li>
         </ul>
@@ -243,39 +300,39 @@
         </ul>
       </div>
     </div>
-    <div class="foot"><span>09</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>11</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 10 -->
+  <!-- 12 -->
   <section class="slide">
     <div class="kicker">Where it stands</div>
     <h2>Measured, not asserted.</h2>
     <div class="stats">
-      <div class="stat"><div class="n healthy">82</div><div class="l">automated tests passing — rules, ML engine, OCPP parsing, battery model, dataset loader</div></div>
-      <div class="stat"><div class="n active">~9 µs</div><div class="l">Tier-1 rule evaluation per frame (mean); p99 &lt; 25 µs over 200k frames</div></div>
-      <div class="stat"><div class="n warn">6 + 2</div><div class="l">deterministic rules live, plus a two-model Tier-2 (Isolation Forest + CUSUM)</div></div>
+      <div class="stat"><div class="n healthy">150</div><div class="l">automated tests passing — rules, ML, OCPP units, electrical model, pipeline, federation over real sockets</div></div>
+      <div class="stat"><div class="n active">~16 µs</div><div class="l">Tier-1 per MeterValues frame (11 readings, ~1 KB), mean; p99 ~19 µs over 200k frames</div></div>
+      <div class="stat"><div class="n warn">9 + 2</div><div class="l">deterministic rules live, plus a two-model Tier-2 (Isolation Forest + CUSUM)</div></div>
     </div>
     <ul style="margin-top:2.4rem">
       <li>Tier-2 is wired into the live relay — every telemetry frame carries a Risk Index; both meter-spoof and drift are flagged in the offline benchmark.</li>
-      <li class="warn">Open before final rehearsal: tune drift rate for a visible on-stage climb; re-fit Tier-2 on a real dataset (ACN-Data / ElaadNL); instrument end-to-end latency.</li>
+      <li class="warn">Next: re-fit Tier-2 on a real dataset (ACN-Data / ElaadNL); instrument end-to-end latency; test against real charger hardware.</li>
     </ul>
-    <div class="foot"><span>10</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>12</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 11 -->
+  <!-- 13 -->
   <section class="slide">
     <div class="kicker">Beyond the hackathon</div>
     <h2>A real path to production.</h2>
     <div class="cols-3">
       <div class="card"><h3><span class="dot d-active"></span>Protocol</h3><p>OCPP 2.0.1 device model, the three security profiles (Basic / TLS / mutual-TLS), ISO 15118 Plug &amp; Charge, smart-charging profiles.</p></div>
-      <div class="card"><h3><span class="dot d-active"></span>Deployment</h3><p>Runs as a CPO ingress sidecar. Horizontal scale via cpid-consistent-hash routing with Redis-backed shared registries. Tested inline against a real open-source CSMS (SteVe / CitrineOS).</p></div>
-      <div class="card"><h3><span class="dot d-active"></span>Detection</h3><p>Tier-2 retrained on real fleet CDRs; per-station personalisation; federated learning across CPOs so the model improves without sharing raw session data.</p></div>
+      <div class="card"><h3><span class="dot d-active"></span>Deployment</h3><p>Built: one node per site, federated through a signed hub, TLS optional. Next: horizontal scale via cpid-consistent-hash routing, and testing inline against a real open-source CSMS (SteVe / CitrineOS).</p></div>
+      <div class="card"><h3><span class="dot d-active"></span>Detection</h3><p>Threat intelligence already federates across sites. Next: Tier-2 retrained on real fleet CDRs, and federated learning so models improve without sharing raw session data.</p></div>
     </div>
     <p class="lede" style="font-size:1.1rem;margin-top:1.8rem">Capacity math from the measured Tier-1 cost: one instance sustains thousands of frames/sec; a 10k-charger CPO at 0.1 Hz MeterValues ≈ 1k fps — a handful of instances.</p>
-    <div class="foot"><span>11</span><span>VOLTSENTRY</span></div>
+    <div class="foot"><span>13</span><span>VOLTSENTRY</span></div>
   </section>
 
-  <!-- 12 -->
+  <!-- 14 -->
   <section class="slide title-slide">
     <div class="brandline"><div class="brandmark">V</div><div class="brandtxt">VoltSentry</div></div>
     <h1>Inline. Transparent.<br>Sub-millisecond.</h1>
@@ -286,12 +343,12 @@
       <span class="node">python -m simulator.twin</span><span class="arrow">→</span>
       <span class="node">npm run dev</span>
     </div>
-    <div class="foot"><span>12</span><span>THANK YOU</span></div>
+    <div class="foot"><span>14</span><span>THANK YOU</span></div>
   </section>
 
 </div>
 
-<div class="nav">← / → &nbsp;·&nbsp; <span id="pg">1</span>/12</div>
+<div class="nav">← / → &nbsp;·&nbsp; <span id="pg">1</span>/14</div>
 <script>
   const slides=[...document.querySelectorAll('.slide')];let i=0;
   const show=n=>{i=Math.max(0,Math.min(slides.length-1,n));slides.forEach((s,k)=>s.classList.toggle('active',k===i));document.getElementById('pg').textContent=i+1};

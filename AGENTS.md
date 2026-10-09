@@ -1,6 +1,6 @@
 # VoltSentry — agent instructions
 
-Read by Claude Code, Antigravity, Cursor and Codex. This is the shared constitution
+Read by every developer's coding agent. This is the shared constitution
 for all three developers' AI agents. Keep it under 12,000 characters (Antigravity's
 per-rules-file cap).
 
@@ -30,15 +30,16 @@ If a task appears to need a change in someone else's folder, stop and report it 
 as a cross-boundary request. Do not make the edit and do not work around it by duplicating
 the file. Reading other folders for context is fine and encouraged.
 
-`shared/schemas.py` is frozen. If your task seems to require a schema change, that is a
-signal you have misread `CONTEXT.md` §6. Re-read it. If the schema genuinely is wrong,
-stop and report — it needs all three humans to agree.
+`shared/schemas.py` only ever gains **optional** fields; never rename or remove one, or the
+recorded replay and older processes stop validating. Units live in field names (`_kw`, `_kva`, `_v`, ...).
+Electrical constants live in `shared/electrical.py` and are mirrored in `dashboard/lib/electrical.ts`.
 
 ---
 
 ## Non-negotiable constants
 
-- Ports: CSMS `9000`, proxy OCPP ingress `8000`, dashboard feed `8100`, twin control `9100`, UI `3000`.
+- Ports: CSMS `9000`, proxy OCPP ingress `8000`, dashboard feed `8100`, twin control `9100`, UI `3000`,
+  federation hub `7700` (nodes) / `7701` (dashboard). A second local site uses `8001`/`8101`/`9101`.
 - Dashboard transport is the browser's **native `WebSocket`**. Socket.io is banned — the
   Python side is raw `websockets` and the two protocols do not interoperate.
 - `IsolationForest(n_estimators=100, contamination=0.02, random_state=42)`. The seed is
@@ -73,7 +74,9 @@ Start order matters: CSMS, then proxy, then twin. The proxy dials upstream at ha
 
 ## Working style
 
-- Everything runs on localhost. There is no cloud, no auth, no TLS, no database. Do not add any.
+- Defaults run on localhost with no TLS. Since the hackathon, federation links are HMAC-signed and
+  TLS is available behind flags (`--tls-cert`, `--hub-ca`); keep both optional so the demo stays one command.
+  Still no cloud and no database.
 - Write the test first for anything in `rules.py`, `ml_engine.py`, `battery.py` or `ocpp.py`.
   Those four are pure logic and cheap to test. Everything else is I/O — test it by running it.
 - Prefer small focused files over one large module. `main.py` should be transport only;

@@ -1,4 +1,4 @@
-# CONTEXT.md — VoltSentry System Specification (v2, hardened)
+# CONTEXT.md — VoltSentry System Specification (v2, hardened; v3 additions in §10)
 
 > **v2 changelog:** fixes 11 contract gaps found in v1 review. Every change is marked `[FIX-n]`.
 > This file is the **binding spec**. The plan argues from it. If plan and spec disagree, spec wins.
@@ -82,6 +82,8 @@ infrastructure.
 | VoltSentry proxy — dashboard fanout | P1 | `ws://localhost:8100/feed` | browser |
 | Charger fleet twin | P2 | — (client) | proxy `:8000` |
 | Twin control channel | P2 | `ws://localhost:9100/control` | — |
+| Federation hub — nodes (v3) | — | `ws://localhost:7700/node` | VoltSentry proxies dial in |
+| Federation hub — dashboard (v3) | — | `ws://localhost:7701/network`, `/healthz` | browser |
 | NOC dashboard | P3 | `http://localhost:3000` | proxy `:8100` |
 
 **`[FIX-2]` — dashboard transport.** v1 specified Socket.io on the frontend against a raw
@@ -152,6 +154,10 @@ already-active `chargePointId`, which is exactly the real attack.
 | `R3_OSCILLATION` | sliding window | ≥ **6** Start/Stop transitions fleet-wide in a **10 s** window `[FIX-8]` |
 | `R4_SESSION_UNIQUE` | connection registry | second handshake for a `cpid` with a live session |
 | `R5_TXN_INTEGRITY` | txn map | `MeterValues.transactionId` unknown or belongs to another `cpid` |
+| `R6_METER_FRAUD` | energy residual | residual ≥ 0.25 kWh **and** climbing ≥ 0.025 kWh/s |
+| `R7_ELECTRICAL` (v3) | cross-measurand | `abs(V × I − P) > max(2 kW, 10 %)` on the DC outlet readings |
+| `R8_TAG_CLONE` (v3) | card registry | `idTag` already in a live session on another bay, here or at another site |
+| `R9_THREAT_INTEL` (v3) | federation | card or charge point on another site's indicator list |
 
 `[FIX-8]` — v1's `>0.5 Hz` was untestable: a frequency needs a window, and "fleet-wide" contradicted
 a per-station attack. Restated as a countable predicate over a named window so it can be unit-tested
@@ -186,13 +192,15 @@ with a fake clock.
 
 ### C. Cyber-physical twin (`/simulator`)
 * **CC-CV battery engine** — discrete-time loop, 1 Hz tick: constant-current to 80% SoC, then
-  exponential taper to 100%. Tracks pack voltage, current, SoC, cumulative kWh.
+  exponential taper to 100%. Tracks pack voltage, current, SoC, cumulative kWh (v3: 192-cell 800 V-class pack; V and I
+  derived from the power curve so P = V × I, see §10.1).
 * **Fleet** — 8 stations `CP-01`..`CP-08` by default, staggered session starts.
 * **Compromise modes** — each station holds a `mode` flag driven by the control channel:
   `clean | meter_spoof | oscillate | drift`.
 * **Inbound CALL handling `[FIX-6]`** — the twin answers `ChangeAvailability` and `Reset` with a
   `CALLRESULT` and applies the state change.
-* **Transformer monitor** — shared 500 kVA transformer; tracks aggregate load and headroom, emitted
+* **Transformer monitor** — shared site transformer (v3: 1250 kVA for 8 × 120 kW, measured in kVA;
+  the hackathon build's 500 kVA could not feed eight fast chargers, see §10.1); tracks aggregate load and headroom, emitted
   on the dashboard feed as its own event `[FIX-12]` (v1 computed it in the twin where the dashboard
   could never see it).
 
@@ -201,10 +209,11 @@ Single-keypress exploits over the twin control channel:
 
 | Key | Attack | Effect | Expected detection |
 | :--- | :--- | :--- | :--- |
-| `1` | `meter_spoof` | station reports 5 kW while drawing 120 kW | R2 + ML |
+| `1` | `meter_spoof` | station reports 5 kW while drawing 120 kW | R7 (first frame) + R6 + ML |
 | `2` | `fleet_oscillate` | 1 Hz Start/Stop across all stations | R3 |
 | `3` | `session_shadow` | duplicate handshake on a live `cpid` | R4 |
 | `4` | `subtle_drift` | −2% compounding power under-report per tick | ML only (score climbs past 0.65 in ~40 s) |
+| `5` | `tag_clone` (v3) | a bay presents a card already charging elsewhere | R8 at that site, R9 at the card's site |
 | `r` | `reset` | clear quarantine, all stations back to clean | — |
 
 ### E. NOC dashboard (`/dashboard`)
@@ -328,6 +337,12 @@ Values are **strings** on the wire (OCPP requirement) and cast float-side by the
 Timestamps on the OCPP wire are ISO-8601 `Z` strings; the `ts` float in §6.1 is the **proxy's**
 receive clock, not the charger's claim. `[FIX-15]`
 
+**v3 — units and location are read, not assumed.** Power and energy are normalised from `W`/`Wh`
+or `kW`/`kWh`; OCPP defaults apply (measurand `Energy.Active.Import.Register`, unit `Wh`,
+location `Outlet`); `SignedData` and non-numeric values are skipped. `power_kw` is the **Outlet**
+(DC) reading. The twin also reports `Voltage` and `Current.Import` at the Outlet, and
+`Power.Active.Import`, per-phase `Voltage` (`L1-L2`, `L2-L3`, `L3-L1`) and `Frequency` at the Inlet.
+
 ---
 
 ## 7. Repository & Ownership
@@ -337,11 +352,13 @@ voltsentry/
 ├── CONTEXT.md                    # this file — spec, frozen
 ├── requirements.txt              # pinned: websockets, pydantic, scikit-learn, numpy, rich, click
 ├── shared/
-│   └── schemas.py                # FROZEN HOUR 1 — no edits without 3-way agreement
+│   ├── schemas.py                # hour-1 contract; since then optional fields only
+│   └── electrical.py             # v3: site supply model (kV, kVA, V, A, Hz)
+├── federation/                   # v3: hub, node client, signed protocol, intel store, keys
 ├── proxy/                        # PERSON 1
 │   ├── main.py                   # asyncio relay :8000 -> :9000, fanout :8100
 │   ├── ocpp.py                   # frame parse/serialise, pending-call map
-│   ├── rules.py                  # R1..R5
+│   ├── rules.py                  # R1..R9
 │   ├── ml_engine.py              # IsolationForest + pinned normalisation
 │   └── state.py                  # per-station FSM, txn registry, quarantine set
 ├── simulator/                    # PERSON 2
@@ -392,11 +409,39 @@ down, every charger connection fails at accept.
 | :--- | :--- | :--- |
 | 0:00 | dashboard on screen, fleet charging | 8 green stations, CC-CV curves rising, transformer at ~62% |
 | 0:30 | one line on why OCPP is exposed | — |
-| 1:00 | press `1` — meter_spoof | CP-03 goes red, `R2_PHYSICS`, frame dropped, station quarantined, audio alert |
+| 1:00 | press `1` — meter_spoof | CP-03 goes red, `R7_ELECTRICAL` (5 kW reported vs V × I ≈ 120 kW), frame dropped, station quarantined, audio alert |
 | 1:40 | press `r`, then `2` — oscillate | transformer gauge swings, `R3_OSCILLATION` fires fleet-wide |
 | 2:20 | press `r`, then `3` — session_shadow | shadow socket rejected at handshake, `R4_SESSION_UNIQUE` |
-| 3:00 | press `r`, then `4` — subtle_drift | **no rule fires**; ML score climbs 0.2 → 0.71 over ~40 s, yellow badge |
+| 3:00 | press `r`, then `4` — subtle_drift | **no rule fires at first**; ML score passes 0.65 ~17 s in (measured), yellow badge; R6 quarantines ~25 s later |
 | 3:40 | export forensic log | JSON downloads |
 
 The `subtle_drift` beat is the pitch. It is the one attack a rule engine cannot catch, and it is why
 Tier-2 exists. Rehearse it twice before judging.
+
+---
+
+## 10. v3 — post-hackathon: real units and a multi-site network
+
+### 10.1 Electrical model (`shared/electrical.py`)
+
+```
+11 kV feeder -> 11 kV / 433 V transformer -> 415 V 3-phase bus (240 V L-N) -> 120 kW DC bays
+```
+
+* Bay draw at full output: 120 / 0.95 + 0.15 = 126.5 kW = 127.7 kVA at PF 0.99.
+* 8 bays: 1022 kVA -> **1250 kVA** transformer (smallest standard rating with no overload).
+* Bus voltage sags with loading: `433 × (1 − 0.035 × loading)` -> ~421 V at 82 %.
+* Line current `I = S / (√3 × V)`; frequency is the grid's, a mean-reverting walk in 49.90–50.05 Hz.
+* `GridEvent.total_load_kw` is the supply-side real power; `headroom_pct` is against the kVA rating.
+  Optional fields carry `output_kw`, `total_load_kva`, `loading_pct`, `lt_voltage_v`, `lt_current_a`,
+  `frequency_hz`. `TelemetryEvent` adds `dc_voltage_v`, `dc_current_a`, `ac_voltage_v`, `frequency_hz`.
+
+### 10.2 Federation (`federation/`)
+
+* One VoltSentry node per site; each dials **out** to the hub (`--hub-url`).
+* Envelope `{v, node, seq, ts, kind, body, sig}`; `sig` = HMAC-SHA256 with the node's key
+  `HMAC(master, "voltsentry-node:" + node_id)`. Rising `seq`, ±120 s `ts` window.
+* Node -> hub: `hello`, `heartbeat`, `threat`, `ioc`, `session`. Hub -> node: `welcome`, `roster`,
+  `threat`, `ioc`, `session`, `session_reset`.
+* Cards travel as `HMAC(tag_salt, idTag)`; the salt comes in `welcome`.
+* Card checks read the node's local replica, so detection never waits on the hub.
