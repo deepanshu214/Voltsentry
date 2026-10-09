@@ -48,6 +48,10 @@ const TIER1 = [
   { id: "R3", name: "Fleet oscillation", d: "≥ 6 start/stop transitions fleet-wide inside a 10-second window." },
   { id: "R4", name: "Session uniqueness", d: "a second handshake for a chargePointId that already holds a live socket." },
   { id: "R5", name: "Transaction integrity", d: "a MeterValues transactionId that is unknown, or owned by another station." },
+  { id: "R6", name: "Meter fraud", d: "the energy register pulling away from the reported power faster than any honest session." },
+  { id: "R7", name: "Electrical consistency", d: "reported power that disagrees with the meter's own DC voltage × current." },
+  { id: "R8", name: "Card clone", d: "an RFID card already charging on another bay, here or at another VoltSentry site." },
+  { id: "R9", name: "Federated intel", d: "a card or charge point another site has reported as compromised." },
 ];
 
 export function StoryLanding({ onLaunchNoc, onOpenLogin }: StoryLandingProps) {
@@ -219,18 +223,19 @@ export function StoryLanding({ onLaunchNoc, onOpenLogin }: StoryLandingProps) {
           The loud attacks die on physics and state.
         </h2>
         <p className="story-reveal story-reveal-delay-1 mt-6 text-lg text-volt-muted max-w-2xl leading-relaxed">
-          Five pure-function rules judge every frame against the FSM and the CC-CV
-          charging envelope. No model, no network hop — just deterministic checks.
+          Nine pure-function rules judge every frame against the FSM, the CC-CV
+          charging envelope and the meter's own electrical readings. No model, no
+          network hop — just deterministic checks.
         </p>
 
         {/* pinned measured stat */}
         <div className="story-reveal story-reveal-delay-2 my-12 p-8 rounded-3xl glass-panel-dense text-center">
-          <div className="text-6xl sm:text-7xl font-black font-mono stat-numeral">~9&thinsp;µs</div>
+          <div className="text-6xl sm:text-7xl font-black font-mono stat-numeral">~16&thinsp;µs</div>
           <div className="mt-3 text-sm text-volt-text font-semibold">
             mean Tier-1 evaluation, per frame
           </div>
           <div className="mt-1 font-mono text-[11px] text-volt-muted">
-            measured over 200,000 frames · median ~8&thinsp;µs · p99 &lt; 25&thinsp;µs · no upstream round-trip
+            measured over 200,000 MeterValues frames (11 measurands, ~1&thinsp;KB) · median ~16&thinsp;µs · p99 ~19&thinsp;µs · no upstream round-trip
           </div>
         </div>
 
@@ -361,10 +366,10 @@ export function StoryLanding({ onLaunchNoc, onOpenLogin }: StoryLandingProps) {
               <div className="text-volt-green font-mono text-xs font-bold uppercase tracking-widest">coordinated fleet</div>
             </div>
             <p className="text-volt-muted leading-relaxed text-sm">
-              Synchronised rapid start/stop across a cluster swings load on a shared{" "}
-              <span className="text-volt-text font-semibold">500&nbsp;kVA</span> distribution
-              transformer — the exact aggregate VoltSentry tracks (load, headroom, active
-              stations) and R3 flags fleet-wide.
+              Synchronised rapid start/stop across a cluster swings load on the site's shared{" "}
+              <span className="text-volt-text font-semibold">1250&nbsp;kVA</span> transformer
+              (11&nbsp;kV in, 415&nbsp;V three-phase out) — the exact aggregate VoltSentry tracks
+              in kVA, with measured bus voltage and line current, and R3 flags fleet-wide.
             </p>
           </div>
         </div>

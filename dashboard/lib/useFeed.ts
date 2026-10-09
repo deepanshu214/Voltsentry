@@ -21,6 +21,9 @@ export function useFeed(options: UseFeedOptions = {}) {
   const [threats, setThreats] = useState<ThreatEvent[]>([]);
   const [powerHistory, setPowerHistory] = useState<PowerHistoryPoint[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  // Telemetry frames received per second: one per MeterValues the proxy inspected.
+  const [ingressRate, setIngressRate] = useState<number>(0);
+  const telemetryCountRef = useRef(0);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -33,6 +36,7 @@ export function useFeed(options: UseFeedOptions = {}) {
 
   const processEvent = useCallback((event: FeedEvent) => {
     if (event.event === "telemetry") {
+      telemetryCountRef.current += 1;
       setStations((prev) => ({
         ...prev,
         [event.station_id]: event,
@@ -73,6 +77,14 @@ export function useFeed(options: UseFeedOptions = {}) {
     }
   }, []);
 
+  useEffect(() => {
+    const id = setInterval(() => {
+      setIngressRate(telemetryCountRef.current);
+      telemetryCountRef.current = 0;
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Fixture feed mode
   useEffect(() => {
     if (mode !== "fixture") return;
@@ -101,14 +113,23 @@ export function useFeed(options: UseFeedOptions = {}) {
 
         if (parsedEvents.length === 0) return;
 
-        let index = 0;
+        // Replay at recorded speed: each 1 s tick emits every event from the
+        // next second of the recording, re-stamped to now so the charts and
+        // threat timestamps read as live. The recording then loops.
+        const t0 = Math.floor(parsedEvents[0].ts);
+        const buckets: FeedEvent[][] = [];
+        for (const ev of parsedEvents) {
+          const sec = Math.max(0, Math.floor(ev.ts) - t0);
+          (buckets[sec] ||= []).push(ev);
+        }
+        let second = 0;
         fixtureIntervalRef.current = setInterval(() => {
           if (!isMounted) return;
-          const ev = parsedEvents[index];
-          if (ev) {
-            processEvent(ev);
+          const now = Date.now() / 1000;
+          for (const ev of buckets[second] || []) {
+            processEvent({ ...ev, ts: now + (ev.ts - Math.floor(ev.ts)) });
           }
-          index = (index + 1) % parsedEvents.length;
+          second = (second + 1) % buckets.length;
         }, 1000);
       })
       .catch((err) => {
@@ -185,6 +206,7 @@ export function useFeed(options: UseFeedOptions = {}) {
     threats,
     powerHistory,
     isConnected,
+    ingressRate,
     mode,
     setMode,
   };

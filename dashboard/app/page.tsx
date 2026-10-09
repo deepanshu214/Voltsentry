@@ -7,6 +7,7 @@ import { useAudioAlert } from "../lib/useAudioAlert";
 import { useVoiceAlert } from "../lib/useVoiceAlert";
 import { GridEvent, StationStatus, TelemetryEvent, ThreatEvent } from "../lib/types";
 import { useGridFrequency } from "../lib/useGridFrequency";
+import { phaseToNeutralV } from "../lib/electrical";
 import { useSyntheticFleet } from "../lib/useSyntheticFleet";
 import { WaveBackground } from "../components/WaveBackground";
 import { PowerChart } from "../components/PowerChart";
@@ -68,8 +69,18 @@ const NetworkTopology = dynamic(() => import("../components/NetworkTopology"), {
   ),
 });
 
+/** Multi-site federation view; only opens a socket to the hub while mounted. */
+const FederationNetwork = dynamic(() => import("../components/FederationNetwork"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[360px] w-full items-center justify-center rounded-2xl border border-volt-line bg-volt-bg">
+      <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
+    </div>
+  ),
+});
+
 type ViewState = "landing" | "noc" | "account" | "settings";
-type NocTab = "all" | "grid" | "fleet" | "twin3d" | "topology" | "threats";
+type NocTab = "all" | "grid" | "fleet" | "twin3d" | "topology" | "network" | "threats";
 
 // The stations the twin actually runs a live socket for.
 const LIVE_STATIONS = ["CP-01", "CP-02", "CP-03", "CP-04", "CP-05", "CP-06", "CP-07", "CP-08"];
@@ -126,7 +137,7 @@ export default function App() {
     [playAlert, speakThreat]
   );
 
-  const { stations, grid, threats, powerHistory, isConnected, mode, setMode } = useFeed({
+  const { stations, grid, threats, powerHistory, isConnected, ingressRate, mode, setMode } = useFeed({
     source: "fixture",
     onThreat: handleThreat,
   });
@@ -249,7 +260,7 @@ export default function App() {
 
           {/* Right Action Items — logged-in Operator widget */}
           <div className="flex items-center space-x-2 font-mono text-xs">
-            {/* Substation frequency — modelled from measured transformer load. */}
+            {/* Supply frequency — measured at the charger inlets. */}
             <GridFrequencyWidget grid={grid} />
             <button
               onClick={() => navigateTo("account")}
@@ -389,10 +400,10 @@ export default function App() {
               </div>
             </header>
 
-            {/* SCADA telemetry strip — grid frequency, phase voltage, load
-                factor, packet ingress, and a live grid-readiness badge. */}
+            {/* SCADA telemetry strip — measured frequency, bus voltage,
+                transformer kVA load, line current, ingress, readiness. */}
             <div className="rounded-2xl glass-panel-dense p-3">
-              <ScadaHeaderStrip grid={grid} threats={threats} isConnected={isConnected} />
+              <ScadaHeaderStrip grid={grid} threats={threats} isConnected={isConnected} ingressRate={ingressRate} />
             </div>
 
             {/* NOC Sub-Navigation Menu Bar for Clean Admin Focus */}
@@ -459,6 +470,18 @@ export default function App() {
                 </button>
 
                 <button
+                  onClick={() => setNocTab("network")}
+                  className={`px-3.5 py-2 rounded-xl transition-all flex items-center space-x-2 font-bold ${
+                    nocTab === "network"
+                      ? "bg-volt-elevated text-slate-100 border border-volt-line-strong"
+                      : "text-slate-400 hover:text-white bg-black/40 border border-transparent"
+                  }`}
+                >
+                  <Globe className="w-4 h-4" />
+                  <span>MULTI-SITE NETWORK</span>
+                </button>
+
+                <button
                   onClick={() => setNocTab("threats")}
                   className={`px-3.5 py-2 rounded-xl transition-all flex items-center space-x-2 font-bold ${
                     nocTab === "threats"
@@ -483,9 +506,9 @@ export default function App() {
                 <div className="lg:col-span-1">
                   <TransformerGauge
                     grid={grid}
-                    fleetSize={fleet.hasSim ? stationCount : undefined}
-                    aggregateKw={fleet.hasSim ? fleetAgg.kw : undefined}
-                    activeCount={fleet.hasSim ? fleetAgg.active : undefined}
+                    bays={stationCount}
+                    scaledOutputKw={fleet.hasSim ? fleetAgg.kw : undefined}
+                    scaledActive={fleet.hasSim ? fleetAgg.active : undefined}
                   />
                 </div>
                 <div className="lg:col-span-2">
@@ -534,6 +557,22 @@ export default function App() {
                   grid={grid}
                   liveStationIds={ALL_STATIONS}
                 />
+              </div>
+            )}
+
+            {/* Multi-site federation: every VoltSentry node and the intel they share. */}
+            {nocTab === "network" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between pt-2">
+                  <h2 className="text-xl font-black text-slate-100 flex items-center space-x-3">
+                    <Globe className="w-5 h-5 text-slate-400" />
+                    <span>VoltSentry Multi-Site Network</span>
+                  </h2>
+                  <div className="text-xs font-mono text-slate-300 bg-black/60 px-3 py-1 rounded-lg border border-white/15">
+                    This console: <span className="text-slate-100 font-medium">{grid?.node_id ?? "standalone"}</span>
+                  </div>
+                </div>
+                <FederationNetwork />
               </div>
             )}
 
@@ -616,6 +655,15 @@ export default function App() {
                             </span>
                           </div>
                           <div className="flex items-center justify-between py-1">
+                            <span className="font-sans text-volt-muted">DC out</span>
+                            <span className="text-slate-100 tabular-nums">
+                              {telemetry?.dc_voltage_v != null ? telemetry.dc_voltage_v.toFixed(0) : "—"}
+                              <span className="text-volt-muted ml-0.5 mr-1.5">V</span>
+                              {telemetry?.dc_current_a != null ? telemetry.dc_current_a.toFixed(0) : "—"}
+                              <span className="text-volt-muted ml-0.5">A</span>
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between py-1">
                             <span className="font-sans text-volt-muted">SoC</span>
                             <span className="text-slate-100 tabular-nums">
                               {telemetry ? soc.toFixed(0) : "0"}
@@ -667,8 +715,8 @@ export default function App() {
                             <ThreatBadge
                               threat={stationThreat}
                               tier={1}
-                              ruleId="R2_PHYSICS"
-                              reason="Power exceeds maximum rating (150.0 kW)"
+                              ruleId="QUARANTINED"
+                              reason="Isolated by a Tier-1 rule; see the security log"
                               actionTaken="quarantined"
                               compact={true}
                             />
@@ -680,7 +728,7 @@ export default function App() {
                               threat={stationThreat}
                               tier={2}
                               mlScore={telemetry?.ml_score}
-                              reason="Risk Index above 0.65 threshold (subtle power drift)"
+                              reason="Risk index above the 0.65 Tier-2 threshold"
                               actionTaken="logged"
                               compact={true}
                             />
@@ -731,13 +779,6 @@ export default function App() {
   );
 }
 
-/**
- * Substation grid frequency ticker for the navbar.
- *
- * The backend publishes load, not frequency, so this is MODELLED from the
- * measured transformer headroom (see lib/useGridFrequency.ts) and labelled as
- * such — it is not a measured PMU reading.
- */
 /**
  * Fleet dimension configurator — preset pills + a numeric stepper. Stations
  * above the live backend count are synthesised and badged SIM downstream.
@@ -798,28 +839,27 @@ function FleetConfigurator({
 }
 
 /**
- * SCADA telemetry strip for the NOC header. Grid frequency is modelled (see
- * useGridFrequency); phase voltage and packet-ingress rate are DERIVED for
- * presentation from the same measured load signal — they are not independent
- * measurements, and are labelled accordingly.
+ * SCADA telemetry strip for the NOC header. Every figure is measured: frequency
+ * and bus voltage are the chargers' own inlet readings (averaged by the proxy),
+ * load is the transformer's kVA against its kVA rating, and ingress counts the
+ * MeterValues frames that actually arrived in the last second.
  */
 function ScadaHeaderStrip({
   grid,
   threats,
   isConnected,
+  ingressRate,
 }: {
   grid: GridEvent | null;
   threats: ThreatEvent[];
   isConnected: boolean;
+  ingressRate: number;
 }) {
   const { hz, deviation, strained } = useGridFrequency(grid);
-  // Phase voltage droops with load, same envelope idea as frequency. Nominal
-  // 400 V line-to-line, ± ~0.6 V. Modelled, not measured.
-  const headroom = grid?.headroom_pct ?? 100;
-  const voltage = 400 - ((100 - headroom) / 100) * 0.8 + (Math.random() - 0.5) * 0.15;
-  const loadPct = grid ? Math.min(100, (grid.total_load_kw / grid.transformer_capacity_kva) * 100) : 0;
-  // Packet ingress ~ one MeterValues per active station per second, jittered.
-  const pps = Math.round((grid?.active_stations ?? 0) * 1.0 + Math.random() * 3);
+  const busV = grid?.lt_voltage_v ?? null;
+  const kva = grid?.total_load_kva ?? null;
+  const loadPct = grid?.loading_pct ?? (kva != null && grid ? (kva / grid.transformer_capacity_kva) * 100 : null);
+  const lineA = grid?.lt_current_a ?? null;
 
   // DEFCON-style readiness from live threat pressure.
   const recentCritical = threats.some(
@@ -837,29 +877,36 @@ function ScadaHeaderStrip({
       <ScadaCell
         icon={<Activity className="h-3 w-3" />}
         label="Grid Freq"
-        value={`${hz.toFixed(2)} Hz`}
-        sub={`${deviation >= 0 ? "+" : ""}${deviation.toFixed(3)} · modelled`}
+        value={hz != null ? `${hz.toFixed(3)} Hz` : "—"}
+        sub={deviation != null ? `${deviation >= 0 ? "+" : ""}${deviation.toFixed(3)} · measured` : "not reported"}
         tone={strained ? "warn" : "ok"}
       />
       <ScadaCell
         icon={<Zap className="h-3 w-3" />}
-        label="Phase V"
-        value={`${voltage.toFixed(1)} V`}
-        sub="L-L · modelled"
+        label="Bus Voltage"
+        value={busV != null ? `${busV.toFixed(1)} V` : "—"}
+        sub={busV != null ? `L-L · ${phaseToNeutralV(busV).toFixed(0)} V L-N` : "not reported"}
         tone="ok"
       />
       <ScadaCell
         icon={<Gauge className="h-3 w-3" />}
-        label="Load Factor"
-        value={`${loadPct.toFixed(0)}%`}
-        sub="substation"
-        tone={loadPct > 85 ? "warn" : "ok"}
+        label="Transformer"
+        value={loadPct != null ? `${loadPct.toFixed(0)}%` : "—"}
+        sub={kva != null && grid ? `${kva.toFixed(0)} / ${grid.transformer_capacity_kva.toFixed(0)} kVA` : "kVA load"}
+        tone={loadPct != null && loadPct > 85 ? "warn" : "ok"}
+      />
+      <ScadaCell
+        icon={<Zap className="h-3 w-3" />}
+        label="Line Current"
+        value={lineA != null ? `${lineA.toFixed(0)} A` : "—"}
+        sub="per phase"
+        tone="ok"
       />
       <ScadaCell
         icon={<Cpu className="h-3 w-3" />}
         label="Ingress"
-        value={`${pps} pps`}
-        sub={isConnected ? "live" : "reconnecting"}
+        value={`${ingressRate} msg/s`}
+        sub={isConnected ? "MeterValues inspected" : "reconnecting"}
         tone="ok"
       />
       <div
@@ -906,7 +953,7 @@ function GridFrequencyWidget({ grid }: { grid: GridEvent | null }) {
   return (
     <div
       className="hidden items-center gap-2 rounded-xl border border-volt-line bg-black/50 px-3 py-1.5 lg:flex"
-      title="Substation frequency — modelled from measured transformer load, not a PMU reading"
+      title="Supply frequency measured at the charger inlets (Indian grid band 49.90-50.05 Hz)"
     >
       <Activity
         className={`h-3.5 w-3.5 ${strained ? "text-state-warn" : "text-state-healthy"}`}
@@ -918,13 +965,12 @@ function GridFrequencyWidget({ grid }: { grid: GridEvent | null }) {
               strained ? "text-amber-300" : "text-emerald-300"
             }`}
           >
-            {hz.toFixed(2)}
+            {hz != null ? hz.toFixed(2) : "—"}
           </span>
           <span className="font-mono text-[9px] text-volt-muted">Hz</span>
         </div>
         <div className="mt-0.5 font-mono text-[8px] uppercase tracking-wider text-volt-muted">
-          {deviation >= 0 ? "+" : ""}
-          {deviation.toFixed(3)} · modelled
+          {deviation != null ? `${deviation >= 0 ? "+" : ""}${deviation.toFixed(3)} · measured` : "not reported"}
         </div>
       </div>
     </div>

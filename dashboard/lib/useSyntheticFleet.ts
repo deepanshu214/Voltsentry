@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StationStatus, TelemetryEvent } from "./types";
+import { batteryPowerKw, terminalVI } from "./electrical";
 
 const ML_THRESHOLD = 0.65;
 
@@ -25,18 +26,20 @@ export function stationId(i: number): string {
   return `CP-${String(i + 1).padStart(2, "0")}`;
 }
 
-/** Deterministic per-station phase so each sim bay animates differently. */
+/** Deterministic per-station phase in [0, 1) so each sim bay animates differently. */
 function seed(i: number): number {
-  return (Math.sin(i * 12.9898) * 43758.5453) % 1;
+  const x = (Math.sin(i * 12.9898) * 43758.5453) % 1;
+  return x < 0 ? x + 1 : x;
 }
 
 function synthTelemetry(i: number, tSec: number): TelemetryEvent {
   const ph = seed(i) * Math.PI * 2;
-  // A slow CC→CV style SoC ramp that wraps, so bays are at different fills.
-  const soc = 20 + ((tSec * 0.6 + seed(i) * 100) % 70);
-  // Power tapers as SoC climbs past the 80% knee (mirrors the real battery).
-  const base = soc > 80 ? 60 * (1 - (soc - 80) / 20) : 118;
-  const power = Math.max(4, base + Math.sin(tSec * 0.5 + ph) * 6);
+  // A slow SoC ramp that wraps, so bays sit at different fills.
+  const soc = 20 + ((tSec * 0.6 + seed(i) * 100) % 79);
+  // The same CC-CV curve and 800 V-class pack as the live twin, so a SIM bay
+  // never shows physics the proxy would flag (no >120 kW, no >60 kW past 80%).
+  const power = batteryPowerKw(soc);
+  const { v, a } = terminalVI(power, soc);
   const energy = ((tSec * 0.03 + seed(i) * 40) % 60) + 2;
   // Healthy band only — sim bays never cross the alert line.
   const ml = 0.12 + (Math.sin(tSec * 0.3 + ph) + 1) * 0.12; // ~0.12–0.36
@@ -49,12 +52,17 @@ function synthTelemetry(i: number, tSec: number): TelemetryEvent {
     ts: Date.now() / 1000,
     power_kw: power,
     soc,
-    dp_dt: Math.cos(tSec * 0.5 + ph) * 2,
+    dp_dt: 0,
     duration_sec: (tSec + seed(i) * 300) % 1800,
     energy_register_kwh: energy,
     energy_residual_kwh: 0.02 + seed(i) * 0.05, // tiny, honest residual
     status,
     ml_score: Math.min(ml, ML_THRESHOLD - 0.05),
+    dc_voltage_v: v,
+    dc_current_a: a,
+    // No inlet voltage or frequency: those are site measurements, never synthesised.
+    ac_voltage_v: null,
+    frequency_hz: null,
   };
 }
 

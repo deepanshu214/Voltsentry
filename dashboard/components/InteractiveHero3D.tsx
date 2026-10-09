@@ -761,7 +761,7 @@ export default function InteractiveHero3D({
             </span>
             <span>Defense Level 4 Active</span>
             <span className="text-volt-line-strong">|</span>
-            <span className="text-state-active">Latency &lt; 9 µs</span>
+            <span className="text-state-active">Tier-1 ≈ 16 <span className="normal-case">µs</span> / frame</span>
           </div>
         </div>
 
@@ -812,7 +812,7 @@ export default function InteractiveHero3D({
           <TelemetryTile
             icon={<Gauge className="h-3.5 w-3.5" />}
             label="Tier-1 Scan"
-            value="~9 µs"
+            value="~16 µs"
             hint="mean / frame"
           />
           <TelemetryTile
@@ -830,7 +830,7 @@ export default function InteractiveHero3D({
           <TelemetryTile
             icon={<ShieldCheck className="h-3.5 w-3.5" />}
             label="Rules Active"
-            value="R1 – R6"
+            value="R1 – R9"
             hint="deterministic tier"
           />
         </div>

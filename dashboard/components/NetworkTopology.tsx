@@ -14,8 +14,8 @@
  *    badge, and injection disabled. They mirror a live station's telemetry so
  *    the layout animates, and they say so in the drawer. They are never
  *    presented as real chargers.
- *  - Substation frequency is modelled from measured transformer load, not
- *    measured directly — see lib/useGridFrequency.ts. Labelled as modelled.
+ *  - Supply frequency is the chargers' own inlet measurement, averaged by the
+ *    proxy (lib/useGridFrequency.ts); shown as a dash when not reported.
  *
  * Rendering: one SVG, no per-frame JS. Power flow is a dashed overlay stroke
  * whose dashoffset animates in CSS; velocity and thickness are bound to kW, so
@@ -507,7 +507,7 @@ export default function NetworkTopology({
               className="fill-white font-mono"
               style={{ fontSize: 17, fontWeight: 700 }}
             >
-              {aggregateKw.toFixed(0)} kW
+              {aggregateKw.toFixed(0)} kW DC
             </text>
             <text
               x={CX}
@@ -517,7 +517,7 @@ export default function NetworkTopology({
               className="font-mono"
               style={{ fontSize: 11, fontWeight: 700 }}
             >
-              {hz.toFixed(2)} Hz
+              {hz != null ? `${hz.toFixed(2)} Hz` : "— Hz"}
             </text>
             <text
               x={CX}
@@ -526,8 +526,7 @@ export default function NetworkTopology({
               className="fill-volt-muted font-mono"
               style={{ fontSize: 8 }}
             >
-              {deviation >= 0 ? "+" : ""}
-              {deviation.toFixed(3)} · modelled
+              {deviation != null ? `${deviation >= 0 ? "+" : ""}${deviation.toFixed(3)} · measured` : "not reported"}
             </text>
           </g>
 
@@ -648,13 +647,13 @@ const ATTACKS: { id: AttackType; label: string; icon: React.ReactNode; blurb: st
     id: "meter_spoof",
     label: "Spoof",
     icon: <Zap className="h-3.5 w-3.5" />,
-    blurb: "Forge MeterValues past the 150 kW ceiling (trips R2_PHYSICS)",
+    blurb: "Report 5 kW while drawing ~120 kW; V × A contradicts it (trips R7_ELECTRICAL)",
   },
   {
     id: "subtle_drift",
     label: "Drift",
     icon: <Waves className="h-3.5 w-3.5" />,
-    blurb: "Slow under-report — no Tier-1 rule fires, Tier-2 should catch it",
+    blurb: "Slow, self-consistent under-report; Tier-2 ML flags it before any Tier-1 rule",
   },
   {
     id: "fleet_oscillate",
@@ -731,7 +730,21 @@ function StationDrawer({
 
       {/* Telemetry */}
       <div className="mt-4 space-y-2">
-        <Stat label="Power draw" value={`${node.powerKw.toFixed(1)} kW`} />
+        <Stat label="Power draw" value={`${node.powerKw.toFixed(1)} kW DC`} />
+        <Stat
+          label="DC output"
+          value={
+            t?.dc_voltage_v != null && t?.dc_current_a != null
+              ? `${t.dc_voltage_v.toFixed(0)} V × ${t.dc_current_a.toFixed(0)} A`
+              : "—"
+          }
+          hint="P = V × I, cross-checked by R7"
+        />
+        <Stat
+          label="Supply at inlet"
+          value={t?.ac_voltage_v != null ? `${t.ac_voltage_v.toFixed(1)} V L-L` : "—"}
+          hint="415 V three-phase bus"
+        />
         <Stat label="State of charge" value={`${node.soc.toFixed(0)} %`} />
         <Stat
           label="Transaction ID"
