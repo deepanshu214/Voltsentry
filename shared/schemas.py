@@ -72,6 +72,9 @@ class ThreatEvent(BaseModel):
     action_taken: Literal["logged", "frame_dropped", "quarantined"]
     raw_frame: Optional[str] = None       # forensic copy of the offending frame
     node_id: Optional[str] = None         # which VoltSentry node raised it
+    # Set only in monitor mode: what enforce mode would have done. action_taken
+    # is then "logged", because nothing was blocked.
+    recommended_action: Optional[Literal["frame_dropped", "quarantined"]] = None
 
 
 class GridEvent(BaseModel):
@@ -100,6 +103,7 @@ class GridEvent(BaseModel):
     lt_voltage_v: Optional[float] = None      # measured bus voltage, line-to-line
     lt_current_a: Optional[float] = None      # per-phase line current
     frequency_hz: Optional[float] = None      # measured supply frequency
+    enforcement: Optional[Literal["enforce", "monitor"]] = None  # this node's mode
 
 
 # --------------------------------------------------------------------------

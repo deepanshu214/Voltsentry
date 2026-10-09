@@ -67,6 +67,7 @@ class Config:
     hub_ca: Optional[str]
     tls_cert: Optional[str]
     tls_key: Optional[str]
+    mode: str
 
 
 def parse_config(argv: Optional[list[str]] = None) -> Config:
@@ -94,6 +95,8 @@ def parse_config(argv: Optional[list[str]] = None) -> Config:
     p.add_argument("--hub-ca", default=env("VOLTSENTRY_HUB_CA"), help="CA bundle to verify a wss:// hub")
     p.add_argument("--tls-cert", default=env("VOLTSENTRY_TLS_CERT"), help="serve OCPP ingress as wss://")
     p.add_argument("--tls-key", default=env("VOLTSENTRY_TLS_KEY"))
+    p.add_argument("--mode", choices=("enforce", "monitor"), default=env("VOLTSENTRY_MODE", "enforce"),
+                   help="monitor: detect and report everything, block nothing (start new sites here)")
     a = p.parse_args(argv)
     transformer_kva = float(a.transformer_kva) if a.transformer_kva else float(el.transformer_for_fleet(a.bays).total_kva)
     return Config(
@@ -101,7 +104,7 @@ def parse_config(argv: Optional[list[str]] = None) -> Config:
         bind=a.bind, ingress_port=a.ingress_port, feed_port=a.feed_port,
         csms_url=a.csms_url.rstrip("/"), bays=a.bays, transformer_kva=transformer_kva,
         hub_url=a.hub_url, fed_key=a.fed_key, hub_ca=a.hub_ca,
-        tls_cert=a.tls_cert, tls_key=a.tls_key,
+        tls_cert=a.tls_cert, tls_key=a.tls_key, mode=a.mode,
     )
 
 
@@ -220,8 +223,9 @@ async def _handle_charger(charger) -> None:
         if blocked:
             v = rules.RuleViolation("R9_THREAT_INTEL", "high", f"charge point on federation blocklist: {blocked}")
             await pipeline.raise_threat(cpid, v, None, emit, action_taken="quarantined")
-            await charger.close(code=4003, reason="blocked by threat intelligence")
-            return
+            if pipeline.ENFORCE:
+                await charger.close(code=4003, reason="blocked by threat intelligence")
+                return
 
     # R4 — reject a second handshake for a station that already has a live socket.
     shadow = rules.check_session_unique(STATE, cpid)
@@ -297,6 +301,7 @@ def grid_event() -> GridEvent:
         lt_voltage_v=round(v_ll, 1) if v_ll is not None else None,
         lt_current_a=round(el.line_current_a(kva, v_ll or el.LT_NOMINAL_LL_V), 1),
         frequency_hz=round(snap.frequency_hz, 3) if snap.frequency_hz is not None else None,
+        enforcement=CFG.mode,
     )
 
 
@@ -322,6 +327,7 @@ def _heartbeat() -> dict:
         "lt_voltage_v": g.lt_voltage_v,
         "frequency_hz": g.frequency_hz,
         "uptime_sec": round(time.time() - STARTED),
+        "mode": CFG.mode,
     }
 
 
@@ -362,6 +368,7 @@ async def _health(path: str, request_headers):
         "quarantined": sorted(STATE.quarantined),
         "dashboard_clients": FEED.count,
         "federation": fed,
+        "mode": CFG.mode,
         "ml_model_loaded": pipeline.ML_MODEL is not None,
     }
     return HTTPStatus.OK, [("Content-Type", "application/json"), ("Cache-Control", "no-store")], json.dumps(body).encode()
@@ -405,6 +412,7 @@ async def main(argv: Optional[list[str]] = None) -> None:
     global CFG, FED
     CFG = parse_config(argv)
     pipeline.NODE_ID = CFG.node_id
+    pipeline.ENFORCE = CFG.mode == "enforce"
     tls = _ingress_tls(CFG)
     tasks = []
     if CFG.hub_url:
@@ -421,6 +429,10 @@ async def main(argv: Optional[list[str]] = None) -> None:
         log(f"site supply {el.HV_SUPPLY_KV:.0f} kV -> {CFG.transformer_kva:.0f} kVA transformer -> "
             f"{el.LT_NOMINAL_LL_V:.0f} V three-phase ({el.phase_to_neutral_v(el.LT_NOMINAL_LL_V):.0f} V phase-neutral)")
         log(f"federation: {CFG.hub_url or 'disabled (standalone site)'}")
+        if CFG.mode == "monitor":
+            log("mode: MONITOR-ONLY - every threat is reported, nothing is blocked or quarantined")
+        else:
+            log("mode: enforce - forged data is quarantined, cloned cards are blocked")
         await _grid_ticker()
 
 

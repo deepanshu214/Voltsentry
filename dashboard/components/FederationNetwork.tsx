@@ -226,6 +226,7 @@ function TopologyMap({ nodes }: { nodes: NetworkNode[] }) {
               </text>
               <text x={x} y={y + 20} textAnchor="middle" fill={st.stroke} className="font-mono" style={{ fontSize: 9.5, fontWeight: 700 }}>
                 {st.label}
+                {n.heartbeat?.mode === "monitor" ? " · MONITOR" : ""}
                 {n.status !== "offline" && loading != null ? ` · ${loading.toFixed(0)}% kVA · ${n.live_sessions} sessions` : ""}
               </text>
             </g>
@@ -282,6 +283,7 @@ function SiteCard({ node }: { node: NetworkNode }) {
   const hb = node.heartbeat || {};
   const v = hb.lt_voltage_v;
   const rows: [string, string][] = [
+    ["Mode", hb.mode === "monitor" ? "monitor-only (reports, never blocks)" : hb.mode === "enforce" ? "enforce" : "—"],
     ["Transformer", node.transformer_kva != null ? `${node.transformer_kva.toFixed(0)} kVA · ${node.bays ?? "?"} bays` : "—"],
     ["Load", hb.load_kva != null ? `${hb.load_kva.toFixed(0)} kVA (${(hb.loading_pct ?? 0).toFixed(0)}%)` : "—"],
     ["To vehicles", hb.output_kw != null ? `${hb.output_kw.toFixed(0)} kW DC` : "—"],
@@ -387,7 +389,9 @@ function GlobalThreats({ threats }: { threats: NetworkThreat[] }) {
                 <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-1 text-[9px] font-bold text-cyan-300">{t.node_id}</span>
                 <span className="text-slate-100">{t.station_id}</span>
                 <span className={t.tier === 2 ? "text-amber-300" : "text-rose-300"}>{t.rule_id ?? `ML ${t.ml_score?.toFixed(2)}`}</span>
-                <span className="text-volt-muted">{t.action_taken}</span>
+                <span className={t.recommended_action ? "text-amber-300" : "text-volt-muted"}>
+                  {t.recommended_action ? `monitor · would ${t.recommended_action === "quarantined" ? "quarantine" : "block"}` : t.action_taken}
+                </span>
                 <span className="ml-auto text-volt-muted">{fmtTime(t.ts)}</span>
               </div>
               <div className="mt-0.5 text-slate-400">{t.reason}</div>

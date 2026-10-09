@@ -406,6 +406,18 @@ export default function App() {
               <ScadaHeaderStrip grid={grid} threats={threats} isConnected={isConnected} ingressRate={ingressRate} />
             </div>
 
+            {grid?.enforcement === "monitor" && (
+              <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 font-mono text-xs text-amber-200">
+                <span className="rounded border border-amber-400/60 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-amber-300">
+                  MONITOR-ONLY
+                </span>
+                <span>
+                  {grid.node_id ?? "This site"} reports every detection but blocks nothing. Switch it to enforce
+                  (<span className="text-amber-100">--mode enforce</span>) once its rules are proven on this site&apos;s meters.
+                </span>
+              </div>
+            )}
+
             {/* NOC Sub-Navigation Menu Bar for Clean Admin Focus */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 p-2 rounded-2xl border border-white/10 text-xs font-mono shadow-lg">
               <div className="flex flex-wrap items-center gap-2">
@@ -594,6 +606,8 @@ export default function App() {
                     const isQuarantined = telemetry?.status === "Quarantined";
                     const isMlAnomaly = (telemetry?.ml_score ?? 0) > 0.65;
                     const stationThreat = threats.find((t) => t.station_id === stationId);
+                    // Monitor mode: a rule fired but the bay was left online.
+                    const wouldBlock = !isQuarantined && stationThreat?.recommended_action != null;
                     const risk = Math.min(Math.max(telemetry?.ml_score ?? 0, 0), 1);
                     const soc = Math.min(Math.max(telemetry?.soc ?? 0, 0), 100);
                     const isCharging = telemetry?.status === "Charging";
@@ -620,7 +634,7 @@ export default function App() {
                         className={`p-3 rounded-lg transition-colors ${
                           isQuarantined
                             ? "glass-card-threat-tier1"
-                            : isMlAnomaly
+                            : isMlAnomaly || wouldBlock
                             ? "glass-card-threat-tier2"
                             : "glass-panel hover:border-volt-line-strong"
                         }`}
@@ -722,7 +736,12 @@ export default function App() {
                             />
                           </div>
                         )}
-                        {isMlAnomaly && !isQuarantined && (
+                        {wouldBlock && (
+                          <div className="mt-2">
+                            <ThreatBadge threat={stationThreat} compact={true} />
+                          </div>
+                        )}
+                        {isMlAnomaly && !isQuarantined && !wouldBlock && (
                           <div className="mt-2">
                             <ThreatBadge
                               threat={stationThreat}

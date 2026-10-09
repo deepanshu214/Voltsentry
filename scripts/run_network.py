@@ -1,7 +1,8 @@
 """Start a two-site VoltSentry network on one machine.
 
-    python scripts/run_network.py            # concise console, full logs in logs/
-    python scripts/run_network.py --verbose  # stream every process
+    python scripts/run_network.py                    # concise console, full logs in logs/
+    python scripts/run_network.py --verbose          # stream every process
+    python scripts/run_network.py --monitor chennai  # Chennai as a new site: detect, never block
 
 What starts (the same processes you would run on separate machines):
 
@@ -31,7 +32,7 @@ PY = sys.executable
 
 # Lines worth showing on a concise console; everything else goes to the log file.
 HIGHLIGHT = ("THREAT", "QUARANTINE", "federation", "joined", "disconnected", "IoC", "cloned",
-             "refused", "WARNING", "Error", "error", "Traceback", "Listening", "listening", "ingress")
+             "refused", "WARNING", "Error", "error", "Traceback", "Listening", "listening", "ingress", "mode:")
 
 SITES = [
     {"key": "vellore", "node": "VS-VELLORE", "name": "Vellore Campus Hub", "region": "Tamil Nadu",
@@ -43,7 +44,7 @@ SITES = [
 ]
 
 
-def plan() -> list[tuple[str, list[str], float]]:
+def plan(monitor: set[str] = frozenset()) -> list[tuple[str, list[str], float]]:
     """(label, argv, delay-before-start)."""
     steps: list[tuple[str, list[str], float]] = [
         ("csms", [PY, "-m", "simulator.csms", "--port", "9000"], 0.0),
@@ -55,6 +56,7 @@ def plan() -> list[tuple[str, list[str], float]]:
             "--lat", s["lat"], "--lon", s["lon"], "--bays", str(s["bays"]),
             "--ingress-port", str(s["ingress"]), "--feed-port", str(s["feed"]),
             "--csms-url", "ws://localhost:9000", "--hub-url", "ws://localhost:7700/node",
+            "--mode", "monitor" if s["key"] in monitor else "enforce",
         ], 1.5 if i == 0 else 0.2))
     for i, s in enumerate(SITES):
         steps.append((f"{s['key']}-twin", [
@@ -78,7 +80,13 @@ def pump(label: str, proc: subprocess.Popen, log_path: Path, verbose: bool) -> N
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--verbose", action="store_true", help="stream every line from every process")
+    ap.add_argument("--monitor", default="", metavar="SITES",
+                    help="comma-separated sites to run in monitor-only mode, e.g. chennai")
     args = ap.parse_args()
+    monitor = {m.strip().lower() for m in args.monitor.split(",") if m.strip()}
+    unknown = monitor - {s["key"] for s in SITES}
+    if unknown:
+        ap.error(f"unknown site(s): {', '.join(sorted(unknown))}; choose from {', '.join(s['key'] for s in SITES)}")
 
     LOGS.mkdir(exist_ok=True)
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(ROOT)}
@@ -100,7 +108,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    for label, argv, delay in plan():
+    for label, argv, delay in plan(monitor):
         time.sleep(delay)
         proc = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append((label, proc))

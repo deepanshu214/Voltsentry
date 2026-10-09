@@ -103,6 +103,7 @@ cd dashboard && npm install && cd ..
 
 ```bash
 python scripts/run_network.py          # concise console; full logs in logs/<process>.log
+# or start Chennai as a new site that only reports: python scripts/run_network.py --monitor chennai
 cd dashboard && npm run dev            # http://localhost:3000 -> NOC -> Multi-Site Network
 ```
 
@@ -206,11 +207,29 @@ Every proxy setting has a flag and an environment variable (`python -m proxy.mai
 | `--bays`, `--transformer-kva` | `VOLTSENTRY_BAYS`, `VOLTSENTRY_TRANSFORMER_KVA` | `8`, sized for the bays |
 | `--hub-url`, `--fed-key`, `--hub-ca` | `VOLTSENTRY_HUB_URL`, `VOLTSENTRY_FED_KEY`, `VOLTSENTRY_HUB_CA` | standalone |
 | `--tls-cert`, `--tls-key` | `VOLTSENTRY_TLS_CERT`, `VOLTSENTRY_TLS_KEY` | plain `ws://` |
+| `--mode` | `VOLTSENTRY_MODE` | `enforce` (`monitor` reports everything, blocks nothing) |
 
 Hub: `python -m federation.hub --master-secret … --tls-cert … --tls-key …` (or
 `VOLTSENTRY_FED_MASTER`). The hub warns while it runs on the development secret or
 without TLS, and a node warns while it uses a development key. OCPP frames over 64 KB
 are refused (close 1009).
+
+### Rolling out to a new site: monitor first
+
+Start every new site with `--mode monitor`. Every rule and the ML model still run, and
+every threat is reported, but nothing is blocked: frames reach the CSMS, cards are never
+answered `Blocked`, and no charger is quarantined or refused. Each threat records what
+enforce mode would have done (`recommended_action`), in the dashboard ("monitor · would
+quarantine"), the forensic log and the network feed, so an operator can count false
+positives on that site's own meters before switching to `--mode enforce`.
+
+A monitor-mode node still shares its threats and card sessions, but publishes no
+blocklist entries, so its unproven detections cannot make other sites block anyone. The
+hub's own cross-site card check still runs, and enforcing sites act on what it finds.
+One rule acts in both modes: a second connection for a charge point that is already
+connected is refused, because the proxy follows one session per charge point. The
+dashboard shows a monitor banner, `/healthz` reports `"mode"`, and the Multi-Site Network
+tab shows each site's mode.
 
 ### Known limits
 
@@ -252,7 +271,7 @@ are refused (close 1009).
 pytest -q
 ```
 
-150 tests: OCPP parsing and unit normalisation, the electrical model, the battery pack,
+153 tests: OCPP parsing and unit normalisation, the electrical model, the battery pack,
 every Tier-1 rule, the ML engine, the twin's meter output read back through the proxy's
 parser, the detection pipeline end to end, the federation protocol (signatures, replay,
 key derivation, TTLs, clone correlation), and a hub with two nodes over real sockets.

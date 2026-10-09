@@ -445,3 +445,11 @@ Tier-2 exists. Rehearse it twice before judging.
   `threat`, `ioc`, `session`, `session_reset`.
 * Cards travel as `HMAC(tag_salt, idTag)`; the salt comes in `welcome`.
 * Card checks read the node's local replica, so detection never waits on the hub.
+
+### 10.3 Enforcement mode (`--mode enforce | monitor`)
+
+* `enforce` (default): quarantine, `Blocked` replies and handshake refusals as specified above.
+* `monitor`: every rule and Tier-2 run; `ThreatEvent.action_taken` is `logged` and
+  `recommended_action` carries what enforce would have done. No frame is dropped or answered,
+  no charger quarantined or refused (except R4's duplicate-connection refusal), and the node
+  publishes no IoCs. `GridEvent.enforcement` and the heartbeat carry the mode.

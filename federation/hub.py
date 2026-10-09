@@ -232,7 +232,8 @@ class Hub:
             rec.last_heartbeat_ts = now
         elif env.kind == "threat":
             threat = {k: body.get(k) for k in (
-                "station_id", "ts", "tier", "rule_id", "ml_score", "severity", "reason", "action_taken")}
+                "station_id", "ts", "tier", "rule_id", "ml_score", "severity", "reason", "action_taken",
+                "recommended_action")}
             threat["node_id"] = rec.node_id
             rec.threats_total += 1
             self.threats.appendleft(threat)

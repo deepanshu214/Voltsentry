@@ -40,6 +40,8 @@ export interface ThreatEvent {
   action_taken: "logged" | "frame_dropped" | "quarantined";
   raw_frame?: string | null;
   node_id?: string | null;
+  /** Monitor mode only: what enforce mode would have done (action_taken is then "logged"). */
+  recommended_action?: "frame_dropped" | "quarantined" | null;
 }
 
 /**
@@ -66,6 +68,8 @@ export interface GridEvent {
   lt_voltage_v?: number | null;
   lt_current_a?: number | null;
   frequency_hz?: number | null;
+  /** "monitor": detections are reported, nothing is blocked. */
+  enforcement?: "enforce" | "monitor" | null;
 }
 
 export type FeedEvent = TelemetryEvent | ThreatEvent | GridEvent;
@@ -84,6 +88,7 @@ export interface NodeHeartbeat {
   lt_voltage_v?: number | null;
   frequency_hz?: number | null;
   uptime_sec?: number;
+  mode?: "enforce" | "monitor";
 }
 
 export interface NetworkNode {
@@ -125,6 +130,7 @@ export interface NetworkThreat {
   severity: "low" | "medium" | "high";
   reason: string;
   action_taken: string;
+  recommended_action?: "frame_dropped" | "quarantined" | null;
   node_id: string;
 }
 

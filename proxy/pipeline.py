@@ -66,6 +66,11 @@ class Verdict:
 FEDERATION: Any = None
 # This node's id, stamped on every ThreatEvent (and so on the forensic log).
 NODE_ID: Optional[str] = None
+# Enforcement mode, set by main.py (--mode). False is monitor-only: every rule
+# and the ML model still run and every threat is reported, but no frame is
+# dropped or answered, no charger is quarantined, and no indicator is shared.
+# A new site runs this way until its rules are proven on its own meters.
+ENFORCE: bool = True
 
 
 def _card_violation(state: ProxyState, cpid: str, id_tag: Optional[str]) -> Optional[rules.RuleViolation]:
@@ -79,7 +84,11 @@ def _card_violation(state: ProxyState, cpid: str, id_tag: Optional[str]) -> Opti
 
 
 def build_threat(
-    cpid: str, violation: rules.RuleViolation, raw_frame: Optional[str], action_taken: str
+    cpid: str,
+    violation: rules.RuleViolation,
+    raw_frame: Optional[str],
+    action_taken: str,
+    recommended_action: Optional[str] = None,
 ) -> ThreatEvent:
     """Turn a RuleViolation into a Tier-1 ThreatEvent (never a hand-built dict)."""
     return ThreatEvent(
@@ -92,6 +101,7 @@ def build_threat(
         action_taken=action_taken,
         raw_frame=raw_frame,
         node_id=NODE_ID,
+        recommended_action=recommended_action,
     )
 
 
@@ -108,11 +118,20 @@ async def raise_threat(
     broadcast: Broadcast,
     action_taken: str = "logged",
 ) -> None:
+    """Report a Tier-1 finding. action_taken is what enforce mode does; in
+    monitor mode it is recorded as recommended_action and the event says logged."""
     key = rules.throttle_key(cpid, violation.rule_id)
     if not THROTTLE.should_emit(key, violation.rule_id, time.time()):
         return
-    event = build_threat(cpid, violation, raw_frame, action_taken)
-    print(f"[proxy] THREAT {cpid} {violation.rule_id} ({action_taken}): {violation.reason}", flush=True)
+    recommended = None
+    if not ENFORCE and action_taken != "logged":
+        recommended, action_taken = action_taken, "logged"
+    event = build_threat(cpid, violation, raw_frame, action_taken, recommended)
+    if recommended is None:
+        label = action_taken
+    else:
+        label = "monitor: would " + ("quarantine" if recommended == "quarantined" else "block")
+    print(f"[proxy] THREAT {cpid} {violation.rule_id} ({label}): {violation.reason}", flush=True)
     _log_incident(event)
     await broadcast(event)
 
@@ -234,8 +253,9 @@ async def inspect_upstream(
         id_tag = payload.get("idTag") if isinstance(payload.get("idTag"), str) else None
         card = _card_violation(state, cpid, id_tag)
         if card is not None:
-            # Answer the charger ourselves; the CSMS never sees the cloned card.
             await raise_threat(cpid, card, raw, broadcast, action_taken="frame_dropped")
+        if card is not None and ENFORCE:
+            # Answer the charger ourselves; the CSMS never sees the cloned card.
             state.resolve_pending(cpid, frame.unique_id)
             if card.rule_id == "R8_TAG_CLONE" and FEDERATION is not None and id_tag:
                 FEDERATION.publish_card_ioc(id_tag, card.reason)
@@ -264,7 +284,7 @@ async def inspect_upstream(
                 cpid, violation, raw, broadcast,
                 action_taken="quarantined" if quarantine else "logged",
             )
-            if quarantine and quarantine_uid is None:
+            if quarantine and ENFORCE and quarantine_uid is None:
                 quarantine_uid = uuid.uuid4().hex
                 quarantine_reason = f"{violation.rule_id}: {violation.reason}"
                 state.quarantine(cpid)

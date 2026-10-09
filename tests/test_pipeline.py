@@ -37,6 +37,7 @@ def _result(uid, payload):
 def _fresh_throttle(monkeypatch):
     monkeypatch.setattr(pipeline, "THROTTLE", rules.ThreatThrottle())
     monkeypatch.setattr(pipeline, "FEDERATION", None)
+    monkeypatch.setattr(pipeline, "ENFORCE", True)
     monkeypatch.setattr(pipeline, "_log_incident", lambda event: None)
 
 
@@ -131,3 +132,79 @@ def test_grid_snapshot_converts_to_real_units():
     stale = state.grid(now=1010.0)  # readings older than 5 s no longer count
     assert stale.lt_voltage_v is None and stale.frequency_hz is None
     assert GridEvent.model_fields["transformer_capacity_kva"].default == 1250.0
+
+
+# ---------------------------------------------------------------- monitor-only mode
+# A new site runs with --mode monitor until its rules are proven on its own
+# meters: every detection is reported with what enforce mode would have done,
+# and nothing is blocked.
+
+
+class FakeFederation:
+    def __init__(self, remote_owner=None, blocked=None):
+        self.remote_owner, self.blocked = remote_owner, blocked
+        self.card_iocs = []
+
+    def check_card(self, id_tag):
+        return self.remote_owner, self.blocked
+
+    def publish_card_ioc(self, id_tag, reason, ttl_sec=3600.0):
+        self.card_iocs.append(id_tag)
+
+
+@pytest.mark.asyncio
+async def test_monitor_mode_reports_a_meter_spoof_but_keeps_the_charger_online(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENFORCE", False)
+    state, osc, feed = ProxyState(), rules.OscillationDetector(), Feed()
+    fleet = FleetManager("ws://x", station_count=1)
+    bay = fleet.stations["CP-01"]
+    await _start_session(state, osc, feed, "CP-01", "TAG-CP-01", 1001)
+    bay.transaction_id = 1001
+    bay.mode = "meter_spoof"
+    p, soc, e = bay.battery.tick(1.0)
+    payload, _ = bay.meter_payload(p, soc, e)
+
+    verdict = await pipeline.inspect_upstream(state, osc, "CP-01", _call("m1", "MeterValues", payload), feed)
+
+    assert verdict.forward and not verdict.start_quarantine and verdict.reply is None
+    r7 = [t for t in feed.of(ThreatEvent) if t.rule_id == "R7_ELECTRICAL"]
+    assert [(t.action_taken, t.recommended_action) for t in r7] == [("logged", "quarantined")]
+    assert not state.is_quarantined("CP-01")
+    assert all(t.status == StationStatus.CHARGING for t in feed.of(TelemetryEvent))
+    assert state.grid().active_stations == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_mode_reports_a_cloned_card_but_lets_the_csms_decide(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENFORCE", False)
+    fed = FakeFederation(remote_owner=("VS-VELLORE", "CP-05"))
+    monkeypatch.setattr(pipeline, "FEDERATION", fed)
+    state, osc, feed = ProxyState(), rules.OscillationDetector(), Feed()
+
+    verdict = await pipeline.inspect_upstream(
+        state, osc, "CHN-02", _call("a1", "Authorize", {"idTag": "TAG-CP-05"}), feed
+    )
+
+    assert verdict.forward and verdict.reply is None  # the CSMS answers, not the proxy
+    threat = feed.of(ThreatEvent)[-1]
+    assert (threat.rule_id, threat.action_taken, threat.recommended_action) == (
+        "R8_TAG_CLONE", "logged", "frame_dropped")
+    assert fed.card_iocs == []  # unproven detections never become network-wide blocks
+    assert state.station("CHN-02").authorized
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_blocks_the_cloned_card_and_shares_it():
+    fed = FakeFederation(remote_owner=("VS-VELLORE", "CP-05"))
+    pipeline.FEDERATION = fed
+    try:
+        state, osc, feed = ProxyState(), rules.OscillationDetector(), Feed()
+        verdict = await pipeline.inspect_upstream(
+            state, osc, "CHN-02", _call("a1", "Authorize", {"idTag": "TAG-CP-05"}), feed
+        )
+    finally:
+        pipeline.FEDERATION = None
+    assert not verdict.forward and verdict.reply is not None
+    threat = feed.of(ThreatEvent)[-1]
+    assert (threat.action_taken, threat.recommended_action) == ("frame_dropped", None)
+    assert fed.card_iocs == ["TAG-CP-05"]
