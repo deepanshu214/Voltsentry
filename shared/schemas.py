@@ -1,8 +1,11 @@
 """VoltSentry shared data contract.
 
-FROZEN AT HOUR 1. Do not edit without all three owners physically present.
-Every field here is consumed by at least two of the three processes; a silent
-rename costs an integration hour you do not have.
+Frozen at hour 1 of the hackathon. Since then only *optional* fields have been
+added, so every older producer and consumer (and the recorded replay fixture)
+still validates. Never rename or remove a field.
+
+Units are in the field name: _kw (real power), _kva (apparent power), _kwh,
+_v (volts), _a (amperes), _hz. A transformer is rated in kVA; kVA = kW / PF.
 """
 
 from enum import Enum
@@ -25,6 +28,7 @@ class AttackType(str, Enum):
     FLEET_OSCILLATE = "fleet_oscillate"
     SESSION_SHADOW = "session_shadow"
     SUBTLE_DRIFT = "subtle_drift"
+    TAG_CLONE = "tag_clone"               # params: {"id_tag": "<card to clone>"}
     RESET = "reset"
 
 
@@ -48,6 +52,12 @@ class TelemetryEvent(BaseModel):
     energy_residual_kwh: float            # register - integral(reported power dt)
     status: StationStatus
     ml_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Electrical context, as reported by the charger's meter. None when the
+    # charger does not report that measurand.
+    dc_voltage_v: Optional[float] = None  # output voltage to the vehicle
+    dc_current_a: Optional[float] = None  # output current to the vehicle
+    ac_voltage_v: Optional[float] = None  # supply voltage at the inlet, line-to-line
+    frequency_hz: Optional[float] = None  # supply frequency at the inlet
 
 
 class ThreatEvent(BaseModel):
@@ -61,15 +71,35 @@ class ThreatEvent(BaseModel):
     reason: str                           # human-readable, rendered on the badge
     action_taken: Literal["logged", "frame_dropped", "quarantined"]
     raw_frame: Optional[str] = None       # forensic copy of the offending frame
+    node_id: Optional[str] = None         # which VoltSentry node raised it
 
 
 class GridEvent(BaseModel):
+    """The site transformer, once a second.
+
+    total_load_kw is the real power the transformer supplies (charger AC
+    input). transformer_capacity_kva is its rating, and headroom_pct is
+    measured against that rating in kVA, not kW.
+    """
+
     event: Literal["grid"] = "grid"
     ts: float
     total_load_kw: float
-    transformer_capacity_kva: float = 500.0
+    transformer_capacity_kva: float = 1250.0
     headroom_pct: float
     active_stations: int
+    node_id: Optional[str] = None
+    site_name: Optional[str] = None
+    output_kw: Optional[float] = None         # DC power delivered to vehicles
+    total_load_kva: Optional[float] = None    # apparent power = total_load_kw / PF
+    loading_pct: Optional[float] = None       # total_load_kva / rating
+    power_factor: Optional[float] = None
+    charger_efficiency: Optional[float] = None
+    hv_supply_kv: Optional[float] = None      # transformer primary
+    lt_nominal_v: Optional[float] = None      # transformer secondary, line-to-line
+    lt_voltage_v: Optional[float] = None      # measured bus voltage, line-to-line
+    lt_current_a: Optional[float] = None      # per-phase line current
+    frequency_hz: Optional[float] = None      # measured supply frequency
 
 
 # --------------------------------------------------------------------------

@@ -1,42 +1,121 @@
-"""VoltSentry proxy — asyncio transport + fanout.
+"""VoltSentry proxy — asyncio transport + fanout. One process per charging site.
 
-  * OCPP ingress   accept ws://localhost:8000/ocpp/{cpid}, relay to CSMS :9000
-  * dashboard feed fan out schema events on ws://localhost:8100/feed
+  * OCPP ingress   accept ws://HOST:8000/ocpp/{cpid}, relay to the CSMS
+  * dashboard feed fan out schema events on ws://HOST:8100/feed
+                   (HTTP GET /healthz on the same port for liveness probes)
+  * federation     optional outbound link to the VoltSentry hub (--hub-url)
 
 Transport only. Per-frame detection is delegated to pipeline.py; judgement to
-rules.py; memory to state.py (BRIEF.md). H6/H7 relay: it detects, emits real
-TelemetryEvent + GridEvent on the feed, and actively quarantines a compromised
-station (ChangeAvailability downstream, then close 4001 on the ack).
+rules.py; memory to state.py (BRIEF.md). It detects, emits TelemetryEvent +
+GridEvent on the feed, and actively quarantines a compromised station
+(ChangeAvailability downstream, then close 4001 on the ack).
+
+Every setting has a flag and an environment variable, so the same build runs
+as a laptop demo (defaults) or as one node of a multi-site network:
+
+    python -m proxy.main --node-id VS-CHENNAI --site-name "Chennai Highway Hub" \\
+        --ingress-port 8001 --feed-port 8101 --hub-url ws://localhost:7700/node
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
+import os
+import ssl
 import time
+from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Any, Optional
 
 import websockets
 from websockets.client import connect
 from websockets.server import serve
 
-from shared.schemas import GridEvent
+from shared import electrical as el
+from shared.schemas import GridEvent, ThreatEvent
 from proxy import ocpp, pipeline, rules
 from proxy.state import ProxyState
 
-INGRESS_HOST, INGRESS_PORT = "localhost", 8000
-CSMS_HOST, CSMS_PORT = "localhost", 9000
-FEED_HOST, FEED_PORT = "localhost", 8100
 OCPP_SUBPROTOCOL = "ocpp1.6"
-
-# The shared 500 kVA transformer (CONTEXT.md §5.C). Treated as kW at unity PF
-# for the headroom figure. Matches GridEvent.transformer_capacity_kva's default.
-TRANSFORMER_CAPACITY_KVA = 500.0
 GRID_TICK_SEC = 1.0
 QUARANTINE_ACK_TIMEOUT_SEC = 3.0  # close anyway if the charger never acks
+# An OCPP 1.6 frame is a few hundred bytes. Anything near this is an attack on
+# the proxy's memory, not a meter reading.
+MAX_OCPP_FRAME_BYTES = 64 * 1024
+# How long another site's report about a charge point keeps it off this site.
+CHARGE_POINT_IOC_TTL_SEC = 900.0
+VERSION = "2.0"
+
+
+@dataclass
+class Config:
+    node_id: str
+    site_name: str
+    region: str
+    lat: Optional[float]
+    lon: Optional[float]
+    bind: str
+    ingress_port: int
+    feed_port: int
+    csms_url: str
+    bays: int
+    transformer_kva: float
+    hub_url: Optional[str]
+    fed_key: Optional[str]
+    hub_ca: Optional[str]
+    tls_cert: Optional[str]
+    tls_key: Optional[str]
+
+
+def parse_config(argv: Optional[list[str]] = None) -> Config:
+    env = os.environ.get
+    p = argparse.ArgumentParser(description="VoltSentry OCPP security proxy (one site)")
+    p.add_argument("--node-id", default=env("VOLTSENTRY_NODE_ID", "VS-VELLORE"))
+    p.add_argument("--site-name", default=env("VOLTSENTRY_SITE_NAME", "Vellore Campus Hub"))
+    p.add_argument("--region", default=env("VOLTSENTRY_REGION", "Tamil Nadu"))
+    p.add_argument("--lat", type=float, default=float(env("VOLTSENTRY_LAT", "12.9692")))
+    p.add_argument("--lon", type=float, default=float(env("VOLTSENTRY_LON", "79.1559")))
+    p.add_argument("--bind", default=env("VOLTSENTRY_BIND", "localhost"),
+                   help="interface to listen on; 0.0.0.0 for real chargers on the LAN")
+    p.add_argument("--ingress-port", type=int, default=int(env("VOLTSENTRY_INGRESS_PORT", "8000")))
+    p.add_argument("--feed-port", type=int, default=int(env("VOLTSENTRY_FEED_PORT", "8100")))
+    p.add_argument("--csms-url", default=env("VOLTSENTRY_CSMS_URL", "ws://localhost:9000"),
+                   help="upstream CSMS base; /ocpp/{cpid} is appended")
+    p.add_argument("--bays", type=int, default=int(env("VOLTSENTRY_BAYS", str(el.SITE_BAYS))),
+                   help="charger bays at this site")
+    p.add_argument("--transformer-kva", type=float, default=env("VOLTSENTRY_TRANSFORMER_KVA"),
+                   help="site transformer rating (default: smallest standard size for --bays at full power)")
+    p.add_argument("--hub-url", default=env("VOLTSENTRY_HUB_URL"),
+                   help="federation hub, e.g. ws://hub:7700/node (omit for a standalone site)")
+    p.add_argument("--fed-key", default=env("VOLTSENTRY_FED_KEY"),
+                   help="this node's federation key (python -m federation.keys NODE_ID)")
+    p.add_argument("--hub-ca", default=env("VOLTSENTRY_HUB_CA"), help="CA bundle to verify a wss:// hub")
+    p.add_argument("--tls-cert", default=env("VOLTSENTRY_TLS_CERT"), help="serve OCPP ingress as wss://")
+    p.add_argument("--tls-key", default=env("VOLTSENTRY_TLS_KEY"))
+    a = p.parse_args(argv)
+    transformer_kva = float(a.transformer_kva) if a.transformer_kva else float(el.transformer_for_fleet(a.bays).total_kva)
+    return Config(
+        node_id=a.node_id, site_name=a.site_name, region=a.region, lat=a.lat, lon=a.lon,
+        bind=a.bind, ingress_port=a.ingress_port, feed_port=a.feed_port,
+        csms_url=a.csms_url.rstrip("/"), bays=a.bays, transformer_kva=transformer_kva,
+        hub_url=a.hub_url, fed_key=a.fed_key, hub_ca=a.hub_ca,
+        tls_cert=a.tls_cert, tls_key=a.tls_key,
+    )
+
 
 # Process-wide shared state: one registry for the whole fleet (R3 is fleet-wide,
 # the txn registry spans stations) and one oscillation window.
 STATE = ProxyState()
 OSCILLATION = rules.OscillationDetector()
+CFG: Config = None  # type: ignore[assignment]  # set in main()
+FED: Any = None     # federation.client.FederationClient when --hub-url is set
+STARTED = time.time()
+
+
+def log(msg: str) -> None:
+    print(f"[proxy] {msg}", flush=True)
 
 
 class FeedHub:
@@ -51,6 +130,10 @@ class FeedHub:
     def discard(self, ws) -> None:
         self._clients.discard(ws)
 
+    @property
+    def count(self) -> int:
+        return len(self._clients)
+
     async def broadcast(self, event) -> None:
         # Always serialise via the schema model — never hand-build the dict.
         if not self._clients:
@@ -63,6 +146,14 @@ class FeedHub:
 
 
 FEED = FeedHub()
+
+
+async def emit(event) -> None:
+    """Every event leaves through here: stamped with this node, shared if a threat."""
+    if isinstance(event, ThreatEvent):
+        if FED is not None:
+            FED.publish_threat(event.model_dump())
+    await FEED.broadcast(event)
 
 
 def _cpid_from_path(path: str) -> str | None:
@@ -81,25 +172,30 @@ async def _quarantine_deadline(charger, cpid: str) -> None:
     await asyncio.sleep(QUARANTINE_ACK_TIMEOUT_SEC)
     if cpid in STATE.quarantine_ack_pending:
         STATE.quarantine_ack_pending.pop(cpid, None)
-        print(f"[proxy] {cpid} quarantine ack timed out; closing 4001", flush=True)
+        log(f"{cpid} quarantine ack timed out; closing 4001")
         await charger.close(code=4001, reason="quarantined")
 
 
 async def _pump_upstream(charger, csms, cpid: str) -> None:
     async for raw in charger:
-        verdict = await pipeline.inspect_upstream(STATE, OSCILLATION, cpid, raw, FEED.broadcast)
+        verdict = await pipeline.inspect_upstream(STATE, OSCILLATION, cpid, raw, emit)
+        if verdict.reply is not None:
+            await charger.send(verdict.reply)
         if verdict.start_quarantine:
             ca = ocpp.serialise_call(
                 "ChangeAvailability",
                 {"connectorId": 1, "type": "Inoperative"},
                 unique_id=verdict.change_availability_uid,
             )
-            print(f"[proxy] {cpid} QUARANTINE -> ChangeAvailability(Inoperative)", flush=True)
+            log(f"{cpid} QUARANTINE -> ChangeAvailability(Inoperative)")
             await charger.send(ca)
+            if FED is not None:
+                FED.publish_ioc("charge_point", cpid, verdict.quarantine_reason or "quarantined",
+                                ttl_sec=CHARGE_POINT_IOC_TTL_SEC)
             asyncio.create_task(_quarantine_deadline(charger, cpid))
             continue  # drop the offending frame
         if verdict.close:
-            print(f"[proxy] {cpid} quarantine ack received; closing 4001", flush=True)
+            log(f"{cpid} quarantine ack received; closing 4001")
             await charger.close(code=4001, reason="quarantined")
             return
         if verdict.forward:
@@ -108,7 +204,6 @@ async def _pump_upstream(charger, csms, cpid: str) -> None:
 
 async def _pump_downstream(csms, charger, cpid: str) -> None:
     async for raw in csms:
-        print(f"[proxy] {cpid} ->cp   {raw}", flush=True)
         pipeline.inspect_downstream(STATE, cpid, raw)
         await charger.send(raw)
 
@@ -119,18 +214,27 @@ async def _handle_charger(charger) -> None:
         await charger.close(code=1008, reason="expected /ocpp/{cpid}")
         return
 
+    # R9 — another site reported this charge point identity as compromised.
+    if FED is not None:
+        blocked = FED.charge_point_blocked(cpid)
+        if blocked:
+            v = rules.RuleViolation("R9_THREAT_INTEL", "high", f"charge point on federation blocklist: {blocked}")
+            await pipeline.raise_threat(cpid, v, None, emit, action_taken="quarantined")
+            await charger.close(code=4003, reason="blocked by threat intelligence")
+            return
+
     # R4 — reject a second handshake for a station that already has a live socket.
     shadow = rules.check_session_unique(STATE, cpid)
     if shadow is not None:
-        await pipeline.raise_threat(cpid, shadow, None, FEED.broadcast)
+        await pipeline.raise_threat(cpid, shadow, None, emit)
         await charger.close(code=4001, reason="duplicate session")
         return
 
     STATE.reset_session(cpid)       # a new socket is always a new session
     STATE.clear_quarantine(cpid)    # reconnect un-quarantines (CONTEXT [FIX-7])
     STATE.register_connection(cpid)
-    upstream_uri = f"ws://{CSMS_HOST}:{CSMS_PORT}/ocpp/{cpid}"
-    print(f"[proxy] {cpid} connected; dialing upstream {upstream_uri}", flush=True)
+    upstream_uri = f"{CFG.csms_url}/ocpp/{cpid}"
+    log(f"{cpid} connected; dialing upstream {upstream_uri}")
     try:
         async with connect(upstream_uri, subprotocols=[OCPP_SUBPROTOCOL]) as csms:
             # Tear down as soon as EITHER side closes. gather() would wait for
@@ -149,23 +253,51 @@ async def _handle_charger(charger) -> None:
                 if exc is not None and not isinstance(exc, websockets.ConnectionClosed):
                     raise exc
     except OSError as exc:
-        print(f"[proxy] {cpid} upstream dial failed: {exc}", flush=True)
+        log(f"{cpid} upstream dial failed: {exc}")
         await charger.close(code=1011, reason="upstream unavailable")
     except websockets.ConnectionClosed:
-        print(f"[proxy] {cpid} connection closed", flush=True)
+        log(f"{cpid} connection closed")
     finally:
         STATE.unregister_connection(cpid)
+        STATE.reset_session(cpid)   # releases the card, so the federation hears the session end
 
 
 async def _handle_feed(ws) -> None:
     # A dashboard client: we only broadcast to it; inbound frames are ignored.
-    print("[proxy] dashboard client connected on :8100/feed", flush=True)
+    log(f"dashboard client connected on :{CFG.feed_port}/feed")
     FEED.add(ws)
     try:
         await ws.wait_closed()
     finally:
         FEED.discard(ws)
-        print("[proxy] dashboard client disconnected", flush=True)
+        log("dashboard client disconnected")
+
+
+def grid_event() -> GridEvent:
+    """The site transformer, in kVA against its kVA rating (CONTEXT.md §5.C)."""
+    snap = STATE.grid()
+    kva = el.apparent_kva(snap.input_kw)
+    loading = kva / CFG.transformer_kva * 100.0
+    v_ll = snap.lt_voltage_v
+    return GridEvent(
+        ts=time.time(),
+        total_load_kw=round(snap.input_kw, 2),
+        transformer_capacity_kva=CFG.transformer_kva,
+        headroom_pct=round(max(0.0, 100.0 - loading), 1),
+        active_stations=snap.active_stations,
+        node_id=CFG.node_id,
+        site_name=CFG.site_name,
+        output_kw=round(snap.output_kw, 2),
+        total_load_kva=round(kva, 2),
+        loading_pct=round(loading, 1),
+        power_factor=el.CHARGER_POWER_FACTOR,
+        charger_efficiency=el.CHARGER_EFFICIENCY,
+        hv_supply_kv=el.HV_SUPPLY_KV,
+        lt_nominal_v=el.LT_NOMINAL_LL_V,
+        lt_voltage_v=round(v_ll, 1) if v_ll is not None else None,
+        lt_current_a=round(el.line_current_a(kva, v_ll or el.LT_NOMINAL_LL_V), 1),
+        frequency_hz=round(snap.frequency_hz, 3) if snap.frequency_hz is not None else None,
+    )
 
 
 async def _grid_ticker() -> None:
@@ -173,24 +305,122 @@ async def _grid_ticker() -> None:
     # Real per-station telemetry is event-driven off MeterValues in the pipeline.
     while True:
         await asyncio.sleep(GRID_TICK_SEC)
-        total_load_kw, active = STATE.grid_snapshot()
-        headroom = max(0.0, (TRANSFORMER_CAPACITY_KVA - total_load_kw) / TRANSFORMER_CAPACITY_KVA * 100.0)
-        await FEED.broadcast(
-            GridEvent(
-                ts=time.time(),
-                total_load_kw=round(total_load_kw, 2),
-                transformer_capacity_kva=TRANSFORMER_CAPACITY_KVA,
-                headroom_pct=round(headroom, 1),
-                active_stations=active,
-            )
+        await FEED.broadcast(grid_event())
+
+
+def _heartbeat() -> dict:
+    g = grid_event()
+    return {
+        "stations_connected": len(STATE.live_connections),
+        "charging": g.active_stations,
+        "quarantined": len(STATE.quarantined),
+        "output_kw": g.output_kw,
+        "input_kw": g.total_load_kw,
+        "load_kva": g.total_load_kva,
+        "transformer_kva": g.transformer_capacity_kva,
+        "loading_pct": g.loading_pct,
+        "lt_voltage_v": g.lt_voltage_v,
+        "frequency_hz": g.frequency_hz,
+        "uptime_sec": round(time.time() - STARTED),
+    }
+
+
+async def _on_federation_message(kind: str, body: dict) -> None:
+    """React locally to intel another site published."""
+    if kind != "ioc" or body.get("source_node") == CFG.node_id:
+        return
+    if body.get("kind") == "id_tag":
+        for id_tag, cpid in STATE.live_sessions():
+            if FED.card_hash(id_tag) == body.get("value"):
+                v = rules.RuleViolation(
+                    "R9_THREAT_INTEL", "high",
+                    f"card charging on {cpid} was flagged elsewhere: {body.get('reason', '')}",
+                )
+                await pipeline.raise_threat(cpid, v, None, emit, action_taken="logged")
+    elif body.get("kind") == "charge_point" and body.get("value") in STATE.live_connections:
+        cpid = body["value"]
+        v = rules.RuleViolation(
+            "R9_THREAT_INTEL", "high",
+            f"{cpid} is connected here but {body.get('source_node')} reported it: {body.get('reason', '')}",
         )
+        await pipeline.raise_threat(cpid, v, None, emit, action_taken="logged")
 
 
-async def main() -> None:
-    async with serve(_handle_charger, INGRESS_HOST, INGRESS_PORT, subprotocols=[OCPP_SUBPROTOCOL]), \
-            serve(_handle_feed, FEED_HOST, FEED_PORT):
-        print(f"[proxy] OCPP ingress ws://{INGRESS_HOST}:{INGRESS_PORT}/ocpp/{{cpid}}", flush=True)
-        print(f"[proxy] dashboard feed ws://{FEED_HOST}:{FEED_PORT}/feed", flush=True)
+async def _health(path: str, request_headers):
+    """HTTP GET /healthz on the feed port; WebSocket upgrades fall through."""
+    if request_headers.get("Upgrade", "").lower() == "websocket":
+        return None
+    if path.split("?", 1)[0] != "/healthz":
+        return HTTPStatus.NOT_FOUND, [("Content-Type", "text/plain")], b"not found"
+    fed = "disabled" if FED is None else ("connected" if FED.connected else "disconnected")
+    body = {
+        "status": "ok",
+        "node_id": CFG.node_id,
+        "version": VERSION,
+        "uptime_sec": round(time.time() - STARTED),
+        "stations_connected": len(STATE.live_connections),
+        "quarantined": sorted(STATE.quarantined),
+        "dashboard_clients": FEED.count,
+        "federation": fed,
+        "ml_model_loaded": pipeline.ML_MODEL is not None,
+    }
+    return HTTPStatus.OK, [("Content-Type", "application/json"), ("Cache-Control", "no-store")], json.dumps(body).encode()
+
+
+def _ingress_tls(cfg: Config) -> Optional[ssl.SSLContext]:
+    if not cfg.tls_cert:
+        return None
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cfg.tls_cert, cfg.tls_key)
+    return ctx
+
+
+def _start_federation(cfg: Config):
+    from federation.client import FederationClient
+    from federation.protocol import DEV_MASTER_SECRET, derive_node_key
+
+    key = cfg.fed_key
+    if not key:
+        key = derive_node_key(DEV_MASTER_SECRET, cfg.node_id)
+        log("WARNING: no --fed-key; using the development key. Issue real keys with python -m federation.keys.")
+    hub_ssl = None
+    if cfg.hub_url.startswith("wss://"):
+        hub_ssl = ssl.create_default_context(cafile=cfg.hub_ca)
+    hello = {
+        "site_name": cfg.site_name, "region": cfg.region, "lat": cfg.lat, "lon": cfg.lon,
+        "version": VERSION, "transformer_kva": cfg.transformer_kva, "bays": cfg.bays,
+    }
+    client = FederationClient(
+        cfg.hub_url, cfg.node_id, key, hello,
+        heartbeat=_heartbeat, live_sessions=STATE.live_sessions,
+        on_message=_on_federation_message, ssl_context=hub_ssl, log=log,
+    )
+    STATE.tag_listener = client.claim_session
+    pipeline.FEDERATION = client
+    return client
+
+
+async def main(argv: Optional[list[str]] = None) -> None:
+    global CFG, FED
+    CFG = parse_config(argv)
+    pipeline.NODE_ID = CFG.node_id
+    tls = _ingress_tls(CFG)
+    tasks = []
+    if CFG.hub_url:
+        FED = _start_federation(CFG)
+        tasks.append(asyncio.create_task(FED.run()))
+
+    scheme = "wss" if tls else "ws"
+    async with serve(_handle_charger, CFG.bind, CFG.ingress_port, subprotocols=[OCPP_SUBPROTOCOL],
+                     ssl=tls, max_size=MAX_OCPP_FRAME_BYTES), \
+            serve(_handle_feed, CFG.bind, CFG.feed_port, process_request=_health):
+        log(f"node {CFG.node_id} - {CFG.site_name}")
+        log(f"OCPP ingress {scheme}://{CFG.bind}:{CFG.ingress_port}/ocpp/{{cpid}} -> CSMS {CFG.csms_url}")
+        log(f"dashboard feed ws://{CFG.bind}:{CFG.feed_port}/feed  (health: http://{CFG.bind}:{CFG.feed_port}/healthz)")
+        log(f"site supply {el.HV_SUPPLY_KV:.0f} kV -> {CFG.transformer_kva:.0f} kVA transformer -> "
+            f"{el.LT_NOMINAL_LL_V:.0f} V three-phase ({el.phase_to_neutral_v(el.LT_NOMINAL_LL_V):.0f} V phase-neutral)")
+        log(f"federation: {CFG.hub_url or 'disabled (standalone site)'}")
         await _grid_ticker()
 
 
@@ -198,4 +428,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("[proxy] shutting down", flush=True)
+        log("shutting down")

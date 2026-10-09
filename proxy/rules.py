@@ -11,6 +11,9 @@ Trip table (CONTEXT.md §5.B):
   R4_SESSION_UNIQUE second handshake for a cpid with a live session
   R5_TXN_INTEGRITY  MeterValues.transactionId unknown or owned by another cpid
   R6_METER_FRAUD   energy residual climbing faster than an honest session ever does
+  R7_ELECTRICAL    reported power disagrees with reported DC voltage x current
+  R8_TAG_CLONE     an RFID card already in a live session here or at another site
+  R9_THREAT_INTEL  an RFID card / charge point on the federation blocklist
 """
 
 from __future__ import annotations
@@ -53,6 +56,12 @@ CV_TAPER_SOC = 80.0
 # meaningful residual has accumulated, from looking like fraud.
 METER_FRAUD_MIN_RESIDUAL_KWH = 0.25
 METER_FRAUD_RATE_KWH_PER_SEC = 0.025
+
+# R7 tolerance. Wire values carry one decimal, so at low taper power rounding
+# alone is a few percent; 2 kW absolute covers that, 10 % covers sampling skew
+# at high power. A meter_spoof (5 kW reported vs ~120 kW from V x I) is off by 96 %.
+ELECTRICAL_ABS_TOL_KW = 2.0
+ELECTRICAL_REL_TOL = 0.10
 
 # Actions that are only legal inside a live session (R1).
 _SESSION_ONLY_ACTIONS = {"MeterValues", "StopTransaction"}
@@ -105,6 +114,55 @@ def check_meter_fraud(
         f"meter under-reporting: {energy_residual_kwh:.2f} kWh unaccounted, "
         f"hiding {residual_rate_kwh_per_sec * 3600:.0f} kW",
     )
+
+
+def check_electrical(
+    power_kw: float, dc_voltage_v: Optional[float], dc_current_a: Optional[float]
+) -> Optional[RuleViolation]:
+    """R7 — reported power must equal the reported voltage x current.
+
+    The three readings come from the same meter at the same instant, so a
+    station that rewrites only the power figure contradicts itself. Silent when
+    the charger does not report V and I: there is nothing to cross-check.
+    """
+    if dc_voltage_v is None or dc_current_a is None:
+        return None
+    implied_kw = dc_voltage_v * dc_current_a / 1000.0
+    tolerance = max(ELECTRICAL_ABS_TOL_KW, ELECTRICAL_REL_TOL * max(abs(implied_kw), abs(power_kw)))
+    if abs(implied_kw - power_kw) <= tolerance:
+        return None
+    return RuleViolation(
+        "R7_ELECTRICAL",
+        "high",
+        f"reported {power_kw:.1f} kW but {dc_voltage_v:.0f} V x {dc_current_a:.0f} A "
+        f"= {implied_kw:.1f} kW",
+    )
+
+
+def check_id_tag(
+    cpid: str,
+    local_owner: Optional[str],
+    remote_owner: Optional[tuple[str, str]],
+    blocked_reason: Optional[str],
+) -> Optional[RuleViolation]:
+    """R8 / R9 — an RFID card can only be in one live session at a time.
+
+    local_owner:   station at this site already charging on the same card
+    remote_owner:  (node_id, station) at another site, from the federation
+    blocked_reason: why the card is on the federation blocklist, if it is
+    """
+    if blocked_reason:
+        return RuleViolation("R9_THREAT_INTEL", "high", f"card on federation blocklist: {blocked_reason}")
+    if remote_owner is not None:
+        node, station = remote_owner
+        return RuleViolation(
+            "R8_TAG_CLONE", "high", f"card already charging at {node}/{station}; cloned RFID on {cpid}"
+        )
+    if local_owner is not None and local_owner != cpid:
+        return RuleViolation(
+            "R8_TAG_CLONE", "high", f"card already charging on {local_owner}; cloned RFID on {cpid}"
+        )
+    return None
 
 
 def check_state_order(station: StationState, action: str) -> Optional[RuleViolation]:
@@ -173,7 +231,7 @@ _FLEET_KEY = "*fleet*"
 # reporting forged data is compromised, so it is quarantined. Fleet-wide (R3)
 # and handshake-time (R4) rules alert only — quarantining on R3 would sever all
 # eight stations on an oscillate, and R4 is already rejected at the handshake.
-QUARANTINE_RULES = {"R2_PHYSICS", "R5_TXN_INTEGRITY", "R6_METER_FRAUD"}
+QUARANTINE_RULES = {"R2_PHYSICS", "R5_TXN_INTEGRITY", "R6_METER_FRAUD", "R7_ELECTRICAL"}
 
 
 def should_quarantine(rule_id: str) -> bool:

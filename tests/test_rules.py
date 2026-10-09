@@ -9,6 +9,8 @@ from shared.schemas import StationStatus
 from proxy.rules import (
     OscillationDetector,
     ThreatThrottle,
+    check_electrical,
+    check_id_tag,
     check_meter_fraud,
     check_physics,
     check_session_unique,
@@ -268,3 +270,72 @@ def test_r6_negative_residual_passes():
 
 def test_r6_quarantines():
     assert should_quarantine("R6_METER_FRAUD") is True
+
+
+# ---------------------------------------------------------------- R7 electrical consistency
+# A DC meter reports power, voltage and current from the same instant, so
+# power must equal V x I. A charger that rewrites only the power figure fails.
+
+def test_r7_honest_sample_passes():
+    # 712.4 V x 168.4 A = 119.97 kW, reported 120.0 kW.
+    assert check_electrical(power_kw=120.0, dc_voltage_v=712.4, dc_current_a=168.4) is None
+
+
+def test_r7_low_power_taper_rounding_passes():
+    # Wire values are rounded to 0.1; at 3 kW that is a few % but well under 2 kW.
+    assert check_electrical(power_kw=3.4, dc_voltage_v=800.9, dc_current_a=4.2) is None
+
+
+def test_r7_meter_spoof_trips():
+    v = check_electrical(power_kw=5.0, dc_voltage_v=712.4, dc_current_a=168.4)
+    assert v is not None and v.rule_id == "R7_ELECTRICAL" and v.severity == "high"
+    assert "5.0 kW" in v.reason and "120.0 kW" in v.reason
+
+
+def test_r7_consistent_under_report_is_left_to_ml():
+    # A careful attacker scales current with power; V x I agrees, R7 stays quiet.
+    assert check_electrical(power_kw=96.0, dc_voltage_v=712.4, dc_current_a=134.8) is None
+
+
+def test_r7_without_voltage_or_current_cannot_judge():
+    assert check_electrical(power_kw=5.0, dc_voltage_v=None, dc_current_a=168.4) is None
+    assert check_electrical(power_kw=5.0, dc_voltage_v=712.4, dc_current_a=None) is None
+
+
+def test_r7_quarantines():
+    assert should_quarantine("R7_ELECTRICAL")
+
+
+# ---------------------------------------------------------------- R8 / R9 id-tag checks
+# One RFID card can only charge one car at a time. R8 catches a card already in
+# a live session (here or at another site); R9 a card on the federation blocklist.
+
+def test_r8_r9_unknown_tag_passes():
+    assert check_id_tag("CP-01", local_owner=None, remote_owner=None, blocked_reason=None) is None
+
+
+def test_r8_same_tag_live_on_another_local_station_trips():
+    v = check_id_tag("CP-02", local_owner="CP-05", remote_owner=None, blocked_reason=None)
+    assert v is not None and v.rule_id == "R8_TAG_CLONE"
+    assert "CP-05" in v.reason
+
+
+def test_r8_same_station_reauthorising_is_not_a_clone():
+    assert check_id_tag("CP-02", local_owner="CP-02", remote_owner=None, blocked_reason=None) is None
+
+
+def test_r8_tag_live_at_another_site_trips():
+    v = check_id_tag("CHN-CP-02", local_owner=None, remote_owner=("VS-VELLORE", "CP-03"), blocked_reason=None)
+    assert v is not None and v.rule_id == "R8_TAG_CLONE"
+    assert "VS-VELLORE" in v.reason and "CP-03" in v.reason
+
+
+def test_r9_blocklisted_tag_trips():
+    v = check_id_tag("CP-01", local_owner=None, remote_owner=None, blocked_reason="cloned at VS-CHENNAI")
+    assert v is not None and v.rule_id == "R9_THREAT_INTEL"
+
+
+def test_r8_r9_do_not_quarantine_the_station():
+    # The card is compromised, not the charger: refuse the card, keep the bay.
+    assert not should_quarantine("R8_TAG_CLONE")
+    assert not should_quarantine("R9_THREAT_INTEL")

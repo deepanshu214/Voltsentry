@@ -267,3 +267,55 @@ def test_reset_returns_stations_to_a_low_soc_battery():
     for s in fleet.stations.values():
         assert s.battery.soc < 80.0, f"{s.cpid} came back at {s.battery.soc}% SoC"
         assert s.battery.energy_kwh == 0.0
+
+
+# ==============================================================================
+# Pack electrical model (voltage / current)
+# ==============================================================================
+
+from simulator.battery import (  # noqa: E402
+    CELLS_IN_SERIES,
+    MAX_CELL_V,
+    open_circuit_voltage_v,
+    terminal_voltage_current,
+)
+from shared.electrical import CHARGER_MAX_DC_A  # noqa: E402
+
+
+def test_pack_open_circuit_voltage_spans_an_800v_class_pack():
+    assert open_circuit_voltage_v(0.0) == pytest.approx(192 * 3.30)
+    assert open_circuit_voltage_v(100.0) == pytest.approx(192 * 4.18)
+    prev = 0.0
+    for soc in range(0, 101):
+        v = open_circuit_voltage_v(float(soc))
+        assert v >= prev  # OCV rises with charge
+        prev = v
+
+
+def test_power_equals_voltage_times_current():
+    for soc in (5.0, 40.0, 79.0, 92.0):
+        v, i = terminal_voltage_current(120.0, soc)
+        assert v * i / 1000.0 == pytest.approx(120.0, rel=1e-9)
+        assert v > open_circuit_voltage_v(soc)  # charging lifts the terminal by I*R
+
+
+def test_full_power_stays_inside_the_ccs2_cable_current_limit():
+    # The worst case is the emptiest pack: lowest voltage -> highest current.
+    for soc in range(0, 79):
+        _, i = terminal_voltage_current(120.0, float(soc))
+        assert i <= CHARGER_MAX_DC_A, f"{i:.0f} A at {soc}% SoC"
+
+
+def test_terminal_voltage_never_exceeds_max_charge_voltage_across_a_session():
+    battery = Battery(initial_soc=10.0, max_power_kw=120.0)
+    for _ in range(4000):
+        p, soc, _ = battery.tick(1.0)
+        assert battery.voltage_v <= CELLS_IN_SERIES * MAX_CELL_V
+        assert battery.voltage_v * battery.current_a / 1000.0 == pytest.approx(p, abs=1e-6)
+        if soc >= 100.0:
+            break
+
+
+def test_idle_pack_draws_no_current():
+    v, i = terminal_voltage_current(0.0, 55.0)
+    assert i == 0.0 and v == pytest.approx(open_circuit_voltage_v(55.0))

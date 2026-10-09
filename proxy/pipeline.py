@@ -56,6 +56,26 @@ class Verdict:
     start_quarantine: bool = False          # send ChangeAvailability downstream
     change_availability_uid: Optional[str] = None
     close: bool = False                     # close the charger socket with 4001
+    reply: Optional[str] = None             # frame the proxy answers the charger with itself
+    quarantine_reason: Optional[str] = None
+
+
+# Federation link (federation.client.FederationClient), set by main.py when this
+# node is part of a network. None means a standalone site: card checks fall
+# back to this site's own sessions.
+FEDERATION: Any = None
+# This node's id, stamped on every ThreatEvent (and so on the forensic log).
+NODE_ID: Optional[str] = None
+
+
+def _card_violation(state: ProxyState, cpid: str, id_tag: Optional[str]) -> Optional[rules.RuleViolation]:
+    """R8 / R9 for the card presented in an Authorize."""
+    if not id_tag:
+        return None
+    remote_owner, blocked = (None, None)
+    if FEDERATION is not None:
+        remote_owner, blocked = FEDERATION.check_card(id_tag)
+    return rules.check_id_tag(cpid, state.tag_owner(id_tag), remote_owner, blocked)
 
 
 def build_threat(
@@ -71,6 +91,7 @@ def build_threat(
         reason=violation.reason,
         action_taken=action_taken,
         raw_frame=raw_frame,
+        node_id=NODE_ID,
     )
 
 
@@ -121,6 +142,7 @@ async def _raise_ml_threat(cpid: str, ml_score: float, raw: str, broadcast: Broa
         reason=f"behavioural anomaly (ML {ml_score:.2f})",
         action_taken="logged",
         raw_frame=raw,
+        node_id=NODE_ID,
     )
     print(f"[proxy] THREAT {cpid} {ML_RULE_ID} (logged): ML score {ml_score:.2f}", flush=True)
     _log_incident(event)
@@ -128,26 +150,29 @@ async def _raise_ml_threat(cpid: str, ml_score: float, raw: str, broadcast: Broa
 
 
 async def _emit_telemetry(
-    state: ProxyState, cpid: str, mv: dict, raw: str, broadcast: Broadcast
+    state: ProxyState, cpid: str, mv: dict, elec: ocpp.Electrical, raw: str, broadcast: Broadcast
 ):
     """Fold a MeterValues into state, score it, and broadcast a TelemetryEvent.
 
-    Returns the SessionFeatures so the Tier-1 pass can judge the energy residual
-    (R6) off the same accumulators, rather than integrating the session twice.
+    Returns (SessionFeatures, TelemetryEvent | None): the features let the Tier-1
+    pass judge the energy residual (R6) off the same accumulators, rather than
+    integrating the session twice.
     """
     station = state.station(cpid)
+    now = time.time()
     feats = station.record_meter_sample(
         power_kw=mv["power_kw"],
         soc=mv["soc"],
         energy_register_kwh=mv["energy_register_kwh"],
-        ts=time.time(),
+        ts=now,
     )
+    station.record_electrical(elec.ac_power_kw, elec.ac_voltage_ll_v, elec.frequency_hz, now)
     ml_score = _score_sample(feats)
     try:
         event = TelemetryEvent(
             station_id=cpid,
             transaction_id=station.transaction_id,
-            ts=time.time(),
+            ts=now,
             power_kw=feats.power_kw,
             soc=min(100.0, max(0.0, feats.soc)),  # schema bounds; a spoof may lie
             dp_dt=feats.dp_dt,
@@ -156,14 +181,18 @@ async def _emit_telemetry(
             energy_residual_kwh=feats.energy_residual_kwh,
             status=station.status,
             ml_score=ml_score,
+            dc_voltage_v=elec.dc_voltage_v,
+            dc_current_a=elec.dc_current_a,
+            ac_voltage_v=round(elec.ac_voltage_ll_v, 1) if elec.ac_voltage_ll_v is not None else None,
+            frequency_hz=elec.frequency_hz,
         )
     except Exception as exc:  # never let one bad frame kill the feed
         print(f"[proxy] {cpid} telemetry build failed: {exc}", flush=True)
-        return feats
+        return feats, None
     await broadcast(event)
     if ml_score > ml_engine.ML_ALERT_THRESHOLD:
         await _raise_ml_threat(cpid, ml_score, raw, broadcast)
-    return feats
+    return feats, event
 
 
 async def inspect_upstream(
@@ -199,18 +228,32 @@ async def inspect_upstream(
     state.note_pending(cpid, frame.unique_id, frame.action)
     action = frame.action
     station = state.station(cpid)
+    payload = frame.payload or {}
 
     if action == "Authorize":
+        id_tag = payload.get("idTag") if isinstance(payload.get("idTag"), str) else None
+        card = _card_violation(state, cpid, id_tag)
+        if card is not None:
+            # Answer the charger ourselves; the CSMS never sees the cloned card.
+            await raise_threat(cpid, card, raw, broadcast, action_taken="frame_dropped")
+            state.resolve_pending(cpid, frame.unique_id)
+            if card.rule_id == "R8_TAG_CLONE" and FEDERATION is not None and id_tag:
+                FEDERATION.publish_card_ioc(id_tag, card.reason)
+            reply = ocpp.serialise_result(frame.unique_id, {"idTagInfo": {"status": "Blocked"}})
+            return Verdict(forward=False, reply=reply)
         state.apply_authorize(cpid)
     elif action == "MeterValues":
-        mv = ocpp.extract_meter_values(frame.payload or {})
-        feats = await _emit_telemetry(state, cpid, mv, raw, broadcast)
+        mv = ocpp.extract_meter_values(payload)
+        elec = ocpp.extract_electrical(payload)
+        feats, telemetry = await _emit_telemetry(state, cpid, mv, elec, raw, broadcast)
 
         quarantine_uid: Optional[str] = None
+        quarantine_reason: Optional[str] = None
         violations = [
             rules.check_state_order(station, action),
-            rules.check_txn_integrity(state, cpid, (frame.payload or {}).get("transactionId")),
+            rules.check_txn_integrity(state, cpid, payload.get("transactionId")),
             rules.check_physics(mv["power_kw"], mv["soc"]),
+            rules.check_electrical(mv["power_kw"], elec.dc_voltage_v, elec.dc_current_a),
             rules.check_meter_fraud(feats.energy_residual_kwh, feats.residual_rate_kwh_per_sec),
         ]
         for violation in violations:
@@ -223,12 +266,26 @@ async def inspect_upstream(
             )
             if quarantine and quarantine_uid is None:
                 quarantine_uid = uuid.uuid4().hex
+                quarantine_reason = f"{violation.rule_id}: {violation.reason}"
                 state.quarantine(cpid)
                 state.quarantine_ack_pending[cpid] = quarantine_uid
 
         if quarantine_uid is not None:
-            return Verdict(forward=False, start_quarantine=True, change_availability_uid=quarantine_uid)
+            # The telemetry above went out before the verdict, still "Charging".
+            # Tell the dashboard the bay is now isolated and delivering nothing.
+            if telemetry is not None:
+                await broadcast(telemetry.model_copy(update={
+                    "status": StationStatus.QUARANTINED,
+                    "power_kw": 0.0,
+                    "dc_current_a": 0.0 if telemetry.dc_current_a is not None else None,
+                }))
+            return Verdict(
+                forward=False, start_quarantine=True, change_availability_uid=quarantine_uid,
+                quarantine_reason=quarantine_reason,
+            )
     elif action in ("StartTransaction", "StopTransaction"):
+        if action == "StartTransaction" and isinstance(payload.get("idTag"), str):
+            station.pending_start_tag[frame.unique_id] = payload["idTag"]
         counts = rules.is_oscillation_transition(action, station.status)
         if action == "StopTransaction":
             order = rules.check_state_order(station, action)
@@ -255,6 +312,9 @@ def inspect_downstream(state: ProxyState, cpid: str, raw: str) -> None:
         return
     action = state.resolve_pending(cpid, frame.unique_id)
     if action == "StartTransaction":
-        txn = (frame.payload or {}).get("transactionId")
+        payload = frame.payload or {}
+        id_tag = state.station(cpid).pending_start_tag.pop(frame.unique_id, None)
+        accepted = (payload.get("idTagInfo") or {}).get("status") == "Accepted"
+        txn = payload.get("transactionId")
         if isinstance(txn, int):
-            state.apply_start_transaction(cpid, txn)
+            state.apply_start_transaction(cpid, txn, id_tag=id_tag if accepted else None)

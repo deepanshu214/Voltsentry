@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -50,9 +51,14 @@ async def handle_client(websocket):
 
 
 async def main():
-    port = 9000
-    print(f"[csms] Listening for OCPP connections on ws://localhost:{port}", flush=True)
-    async with websockets.serve(handle_client, "localhost", port):
+    # One CSMS serves every site, as an operator's central system does; each
+    # site's VoltSentry node dials it. Transaction ids are unique network-wide.
+    p = argparse.ArgumentParser(description="Mock central CSMS")
+    p.add_argument("--host", default="localhost")
+    p.add_argument("--port", type=int, default=9000)
+    a = p.parse_args()
+    print(f"[csms] Listening for OCPP connections on ws://{a.host}:{a.port}", flush=True)
+    async with websockets.serve(handle_client, a.host, a.port):
         await asyncio.Future()
 
 

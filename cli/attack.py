@@ -62,10 +62,11 @@ def display_menu():
     table.add_column("Target", style="green", width=14)
     table.add_column("Expected Detection Rule / Mechanism", style="yellow")
 
-    table.add_row("1", "Meter Spoof", "CP-03", "R2_PHYSICS (Draws 120 kW, reports 5 kW)")
+    table.add_row("1", "Meter Spoof", "CP-03", "R7_ELECTRICAL (reports 5 kW; its own V x A says ~120 kW)")
     table.add_row("2", "Fleet Oscillate", "Fleet-wide", "R3_OSCILLATION (1 Hz rapid Start/Stop cycles)")
     table.add_row("3", "Session Shadow", "CP-01 (:8000)", "R4_SESSION_UNIQUE (Rogue duplicate handshake)")
     table.add_row("4", "Subtle Drift", "CP-02", "ML Anomaly (compounding -2% power decay/tick)")
+    table.add_row("5", "Card Clone", "--station + --tag", "R8_TAG_CLONE (one RFID card live at two bays/sites)")
     table.add_row("r", "Fleet Reset", "All Stations", "Clears quarantine & resets to clean mode")
     table.add_row("q", "Quit", "-", "Exit Red-Team CLI")
 
@@ -82,30 +83,38 @@ async def run_interactive_tui():
         if choice == "1":
             console.print("[cli] Dispatching [bold red]Meter Spoof[/bold red] to CP-03...")
             trigger = AttackTrigger(attack_type=AttackType.METER_SPOOF, station_id="CP-03")
-            ack = await send_trigger(trigger)
+            ack = await send_trigger(trigger, CONTROL_URL)
             console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
 
         elif choice == "2":
             console.print("[cli] Dispatching [bold red]Fleet Oscillate[/bold red]...")
             trigger = AttackTrigger(attack_type=AttackType.FLEET_OSCILLATE, station_id=None)
-            ack = await send_trigger(trigger)
+            ack = await send_trigger(trigger, CONTROL_URL)
             console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
 
         elif choice == "3":
             console.print("[cli] Executing [bold red]Session Shadowing[/bold red] directly against :8000...")
-            ack = await execute_session_shadow(station_id="CP-01")
+            ack = await execute_session_shadow(station_id="CP-01", base_url=PROXY_INGRESS_URL)
             console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
 
         elif choice == "4":
             console.print("[cli] Dispatching [bold yellow]Subtle Drift[/bold yellow] to CP-02...")
             trigger = AttackTrigger(attack_type=AttackType.SUBTLE_DRIFT, station_id="CP-02")
-            ack = await send_trigger(trigger)
+            ack = await send_trigger(trigger, CONTROL_URL)
+            console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
+
+        elif choice == "5":
+            station = click.prompt("[cli] Station that presents the cloned card", default="CP-05")
+            tag = click.prompt("[cli] Card to clone (idTag live elsewhere)", default="TAG-CP-03")
+            console.print(f"[cli] Dispatching [bold red]Card Clone[/bold red]: {station} presents {tag}...")
+            trigger = AttackTrigger(attack_type=AttackType.TAG_CLONE, station_id=station, params={"id_tag": tag})
+            ack = await send_trigger(trigger, CONTROL_URL)
             console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
 
         elif choice == "r":
             console.print("[cli] Dispatching [bold green]Fleet Reset[/bold green]...")
             trigger = AttackTrigger(attack_type=AttackType.RESET)
-            ack = await send_trigger(trigger)
+            ack = await send_trigger(trigger, CONTROL_URL)
             console.print(f"[cli] Result: {'[green]OK[/green]' if ack.ok else '[red]FAILED[/red]'} - {ack.detail}\n")
 
         elif choice in ("q", "quit", "exit"):
@@ -116,26 +125,35 @@ async def run_interactive_tui():
 
 
 @click.command()
-@click.option("--attack", "-a", type=click.Choice(["1", "2", "3", "4", "r"]), help="Single-shot attack command key")
+@click.option("--attack", "-a", type=click.Choice(["1", "2", "3", "4", "5", "r"]), help="Single-shot attack command key")
 @click.option("--station", "-s", default=None, help="Target station ID (e.g. CP-03)")
-def main(attack: Optional[str], station: Optional[str]):
+@click.option("--tag", "-t", default=None, help="Card to clone for attack 5 (e.g. TAG-CP-03)")
+@click.option("--control-url", default=CONTROL_URL, show_default=True, help="Twin control channel of the target site")
+@click.option("--proxy-url", default=PROXY_INGRESS_URL, show_default=True, help="Proxy OCPP ingress of the target site (attack 3)")
+def main(attack: Optional[str], station: Optional[str], tag: Optional[str], control_url: str, proxy_url: str):
     """VoltSentry Red-Team CLI exploit launcher."""
+    global CONTROL_URL, PROXY_INGRESS_URL
+    CONTROL_URL, PROXY_INGRESS_URL = control_url, proxy_url
     if attack:
         # Non-interactive single command mode
         if attack == "1":
             trigger = AttackTrigger(attack_type=AttackType.METER_SPOOF, station_id=station or "CP-03")
-            ack = asyncio.run(send_trigger(trigger))
+            ack = asyncio.run(send_trigger(trigger, control_url))
         elif attack == "2":
             trigger = AttackTrigger(attack_type=AttackType.FLEET_OSCILLATE, station_id=station)
-            ack = asyncio.run(send_trigger(trigger))
+            ack = asyncio.run(send_trigger(trigger, control_url))
         elif attack == "3":
-            ack = asyncio.run(execute_session_shadow(station_id=station or "CP-01"))
+            ack = asyncio.run(execute_session_shadow(station_id=station or "CP-01", base_url=proxy_url))
         elif attack == "4":
             trigger = AttackTrigger(attack_type=AttackType.SUBTLE_DRIFT, station_id=station or "CP-02")
-            ack = asyncio.run(send_trigger(trigger))
+            ack = asyncio.run(send_trigger(trigger, control_url))
+        elif attack == "5":
+            trigger = AttackTrigger(attack_type=AttackType.TAG_CLONE, station_id=station or "CP-05",
+                                    params={"id_tag": tag or "TAG-CP-03"})
+            ack = asyncio.run(send_trigger(trigger, control_url))
         elif attack == "r":
             trigger = AttackTrigger(attack_type=AttackType.RESET)
-            ack = asyncio.run(send_trigger(trigger))
+            ack = asyncio.run(send_trigger(trigger, control_url))
         console.print(f"[cli] Ack: ok={ack.ok} detail={ack.detail}")
     else:
         # Interactive TUI mode

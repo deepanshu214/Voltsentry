@@ -7,15 +7,14 @@ node_modules/
 .next/
 out/
 logs/*.jsonl
+logs/*.log
 .DS_Store
 .env
 .env*.local
 *.tsbuildinfo
-.claude/scheduled_tasks.lock
 
 # per-person agent scratch — never commit, this is how we avoid rule collisions
 .agents/rules/99-*.md
-CLAUDE.local.md
 .antigravity/
 *.zip
 *.patch
