@@ -171,6 +171,18 @@ def test_throttle_is_per_station_and_per_rule():
     assert t.should_emit("CP-03", "R1_STATE_ORDER", now=100.1) is True
 
 
+def test_a_blocked_card_retried_by_one_charger_is_reported_once_a_minute():
+    t = ThreatThrottle()
+    assert t.should_emit("CHN-02", "R8_TAG_CLONE", now=100.0) is True
+    # the charger retries every 10 s; each retry is refused but not re-reported
+    assert t.should_emit("CHN-02", "R8_TAG_CLONE", now=110.0) is False
+    assert t.should_emit("CHN-02", "R8_TAG_CLONE", now=150.0) is False
+    assert t.should_emit("CHN-02", "R8_TAG_CLONE", now=100.0 + t.BLOCK_COOLDOWN_SEC) is True
+    # a forged meter on the same charger keeps the short cooldown
+    t.should_emit("CHN-02", "R7_ELECTRICAL", now=100.0)
+    assert t.should_emit("CHN-02", "R7_ELECTRICAL", now=100.0 + t.COOLDOWN_SEC) is True
+
+
 # R3 is defined fleet-wide (CONTEXT.md §5.B), so it must collapse to ONE badge
 # per window, not one per station — an 8-station oscillate otherwise emits 8.
 

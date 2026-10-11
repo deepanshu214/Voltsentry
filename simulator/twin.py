@@ -14,6 +14,8 @@ from simulator.battery import Battery
 
 # A charger told its card is not Accepted waits this long before trying again.
 AUTH_RETRY_SEC = 10.0
+# How long the operator takes to hand a driver a replacement for a blocked card.
+CARD_REISSUE_SEC = 3.0
 
 
 def iso_now() -> str:
@@ -70,6 +72,8 @@ class StationTwin:
         self.site = site
         # RFID card presented at Authorize. tag_clone swaps in someone else's.
         self.id_tag_override: Optional[str] = None
+        # Replacements issued for this bay's own card after the network blocked it.
+        self.card_issue = 0
         # What the bay really draws (kW DC), whatever it reports. Feeds the site model.
         self.actual_power_kw = 0.0
         # Small fixed phase imbalance, distinct per bay, as a real supply has.
@@ -90,8 +94,19 @@ class StationTwin:
         self.receiver_task: Optional[asyncio.Task] = None
 
     @property
+    def own_card(self) -> str:
+        # OCPP 1.6 idTags are at most 20 characters.
+        base = f"TAG-{self.cpid}"
+        return base if self.card_issue == 0 else f"{base}-R{self.card_issue}"
+
+    @property
     def id_tag(self) -> str:
-        return self.id_tag_override or f"TAG-{self.cpid}"
+        return self.id_tag_override or self.own_card
+
+    def reissue_card(self) -> str:
+        """Replace this bay's card after the network blocked it; the old card stays blocked."""
+        self.card_issue += 1
+        return self.own_card
 
     def meter_payload(self, actual_power: float, soc: float, energy_kwh: float) -> tuple[dict, float]:
         """Build one MeterValues payload; returns (payload, reported_power_kw).
@@ -229,6 +244,24 @@ class StationTwin:
         except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
             pass
 
+    async def _authorize(self) -> None:
+        """Present the card until it is Accepted."""
+        while True:
+            auth_res = await self.call("Authorize", {"idTag": self.id_tag})
+            auth_status = (auth_res.get("idTagInfo") or {}).get("status")
+            if auth_status == "Accepted":
+                break
+            if auth_status == "Blocked" and self.id_tag_override is None:
+                # The driver's own card is blocked, so a copy of it was used
+                # somewhere. The copy stays blocked; the driver gets a new card.
+                old = self.id_tag
+                print(f"{self.prefix} Card {old} blocked; operator issues replacement {self.reissue_card()}", flush=True)
+                await asyncio.sleep(CARD_REISSUE_SEC)
+                continue
+            print(f"{self.prefix} Card {self.id_tag} refused ({auth_status}); not charging", flush=True)
+            await asyncio.sleep(AUTH_RETRY_SEC)
+        print(f"{self.prefix} Authorized ({self.id_tag})", flush=True)
+
     async def run(self) -> None:
         """Main lifecycle loop for this charger station."""
         if self.start_delay > 0:
@@ -249,14 +282,7 @@ class StationTwin:
                     print(f"{self.prefix} BootNotification accepted", flush=True)
 
                     # 2. Authorize. A real charger only starts on an Accepted card.
-                    while True:
-                        auth_res = await self.call("Authorize", {"idTag": self.id_tag})
-                        auth_status = (auth_res.get("idTagInfo") or {}).get("status")
-                        if auth_status == "Accepted":
-                            break
-                        print(f"{self.prefix} Card {self.id_tag} refused ({auth_status}); not charging", flush=True)
-                        await asyncio.sleep(AUTH_RETRY_SEC)
-                    print(f"{self.prefix} Authorized ({self.id_tag})", flush=True)
+                    await self._authorize()
 
                     # 3. StartTransaction
                     start_res = await self.call(

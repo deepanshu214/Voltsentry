@@ -116,3 +116,50 @@ async def test_quarantined_bay_stops_loading_the_site_immediately():
     assert bay.actual_power_kw == 0.0
     assert fleet.site.load_kva() == pytest.approx(7 * el.bay_peak_kva())
     assert fleet.site.lt_voltage_v() > loaded_v  # less load, less sag
+
+
+class _ScriptedCsms:
+    """Stands in for StationTwin.call: answers each Authorize from a script."""
+
+    def __init__(self, auth_statuses):
+        self.auth_statuses = list(auth_statuses)
+        self.calls = []
+
+    async def __call__(self, action, payload):
+        self.calls.append((action, payload))
+        return {"idTagInfo": {"status": self.auth_statuses.pop(0)}}
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_own_card_is_replaced_and_the_bay_charges(monkeypatch):
+    monkeypatch.setattr("simulator.twin.CARD_REISSUE_SEC", 0.0)
+    bay = _charging_bay()
+    bay.call = csms = _ScriptedCsms(["Blocked", "Accepted"])
+    await bay._authorize()
+    assert [p["idTag"] for _, p in csms.calls] == ["TAG-CP-01", "TAG-CP-01-R1"]
+    assert bay.id_tag == "TAG-CP-01-R1"
+
+
+@pytest.mark.asyncio
+async def test_a_bay_presenting_a_cloned_card_keeps_retrying_it(monkeypatch):
+    monkeypatch.setattr("simulator.twin.AUTH_RETRY_SEC", 0.0)
+    bay = _charging_bay()
+    bay.id_tag_override = "TAG-CP-05"
+    bay.call = csms = _ScriptedCsms(["Blocked", "Blocked", "Accepted"])
+    await bay._authorize()
+    assert [p["idTag"] for _, p in csms.calls] == ["TAG-CP-05"] * 3 and bay.card_issue == 0
+
+
+def test_a_replacement_card_survives_a_reset():
+    fleet = FleetManager("ws://x", station_count=6)
+    bay = fleet.stations["CP-05"]
+    bay.reissue_card()
+    fleet.apply_trigger(AttackTrigger(attack_type=AttackType.RESET))
+    assert bay.id_tag == "TAG-CP-05-R1"  # the old card is still blocked network-wide
+
+
+def test_replacement_cards_stay_within_the_ocpp_idtag_limit():
+    bay = FleetManager("ws://x", station_count=6, prefix="CHN").stations["CHN-06"]
+    for _ in range(12):
+        bay.reissue_card()
+    assert bay.id_tag == "TAG-CHN-06-R12" and len(bay.id_tag) <= 20

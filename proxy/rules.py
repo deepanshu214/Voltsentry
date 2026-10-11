@@ -257,14 +257,22 @@ class ThreatThrottle:
     """
 
     COOLDOWN_SEC = 10.0
+    # A blocked card or charge point is retried every few seconds for as long
+    # as the attack lasts. Each retry is refused, but it is one incident, so it
+    # is reported once a minute rather than every ten seconds.
+    BLOCK_RULES = frozenset({"R8_TAG_CLONE", "R9_THREAT_INTEL"})
+    BLOCK_COOLDOWN_SEC = 60.0
 
     def __init__(self) -> None:
         self._last: dict[tuple[str, str], float] = {}
 
+    def cooldown(self, rule_id: str) -> float:
+        return self.BLOCK_COOLDOWN_SEC if rule_id in self.BLOCK_RULES else self.COOLDOWN_SEC
+
     def should_emit(self, cpid: str, rule_id: str, now: float) -> bool:
         key = (cpid, rule_id)
         last = self._last.get(key)
-        if last is not None and now - last < self.COOLDOWN_SEC:
+        if last is not None and now - last < self.cooldown(rule_id):
             return False
         self._last[key] = now
         return True

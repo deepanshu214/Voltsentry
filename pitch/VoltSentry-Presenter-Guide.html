@@ -91,7 +91,7 @@
   <tr><td class="t">2:55</td><td>Dashboard</td><td><code>r</code> then <code>3</code> — session shadow. Handshake refused.</td></tr>
   <tr><td class="t">3:15</td><td>Dashboard</td><td><code>r</code> then <code>4</code> — subtle drift. <b>No rule fires.</b> Risk Index climbs past 0.65.</td></tr>
   <tr><td class="t">3:35</td><td>Dashboard</td><td>Attack 5 — card clone across sites; show the <b>Multi-Site Network</b> tab. (Only if the two-site network is running.)</td></tr>
-  <tr><td class="t">3:50</td><td>Dashboard</td><td>Click <b>Export incident logs</b> — JSON downloads.</td></tr>
+  <tr><td class="t">3:50</td><td>Dashboard</td><td>Reset <b>both</b> sites, then click <b>Export incident logs</b> — JSON downloads.</td></tr>
   <tr><td class="t">3:55</td><td>Deck slide 11 / 14</td><td>"What's real" honesty beat, then the close.</td></tr>
 </table>
 
@@ -224,14 +224,20 @@
 <h3>Attack 5 — card clone <span class="sub">(needs the two-site network: <code>python scripts/run_network.py</code>)</span></h3>
 <table>
   <tr><th>Run</th><td><code>python -m cli.attack -a 5 -s CHN-02 -t TAG-CP-05 --control-url ws://localhost:9101/control</code></td></tr>
-  <tr><th>Expected</th><td>A Chennai bay presents a card that is still charging a car in Vellore. Chennai's node answers the Authorize itself with <b>Blocked</b> → <span class="rule">R8_TAG_CLONE</span>; the CSMS never sees it. Vellore raises <span class="rule">R9_THREAT_INTEL</span> on CP-05. The NOC's <b>Multi-Site Network</b> tab shows the shared indicator (a hash, not the card number).</td></tr>
+  <tr><th>Expected</th><td>A Chennai bay presents a card that is still charging a car in Vellore. Chennai's node answers the Authorize itself with <b>Blocked</b> → <span class="rule">R8_TAG_CLONE</span>; the CSMS never sees it. Vellore raises <span class="rule">R9_THREAT_INTEL</span> on CP-05. The NOC's <b>Multi-Site Network</b> tab shows the shared indicator (a hash, not the card number). CHN-02 keeps retrying the copy every 10 s; every try is refused, but it is one incident, so it is logged once a minute, not every retry. The real car on CP-05 keeps charging.</td></tr>
 </table>
 <div class="say"><ul>
   <li>"One card can only charge one car at a time. Neither site alone can see this card is in two places — the network can."</li>
 </ul></div>
 
-<h3>Close the demo — <code>r</code></h3>
-<div class="do">Press <code>r</code> once more so the fleet is green when you cut back to the deck. Then click <b>Export incident logs</b> — a JSON file downloads. "Every detection is on the wire and in the forensic log."</div>
+<h3>Close the demo — reset both sites</h3>
+<div class="do">The clone runs on Chennai, so reset both sites: press <code>r</code> in the CLI (Vellore), then run <code>python -m cli.attack -a r --control-url ws://localhost:9101/control</code> (Chennai). Wait a few seconds until the <b>Multi-Site Network</b> tab shows every bay charging at both sites. Then click <b>Export incident logs</b> — a JSON file downloads. "Every detection is on the wire and in the forensic log."</div>
+<table>
+  <tr><th>Expected</th><td>The cloned card stays on the network blocklist for an hour; a reset does not unblock it. So when CP-05 starts again, its old card <code>TAG-CP-05</code> is refused once, the operator issues the driver a replacement (<code>TAG-CP-05-R1</code>), and CP-05 charges on the new card a few seconds later. That refusal adds at most one <span class="rule">R9_THREAT_INTEL</span> line; after it the security log stays quiet.</td></tr>
+</table>
+<div class="say"><ul>
+  <li>If asked why CP-05's card changed: "Once a card is copied, the copy is as good as the original, so the card number is blocked everywhere and the customer gets a new card. That's what an operator does with a cloned bank card too."</li>
+</ul></div>
 
 <h2>Known risks &amp; recovery</h2>
 <table>
@@ -241,6 +247,8 @@
   <tr><td>A process died</td><td>Operator says so quietly; Narrator keeps on the deck; restart in order CSMS → proxy → twin, or cut to the backup video.</td></tr>
   <tr><td>The Multi-Site tab says "hub not reachable"</td><td>The network was started single-site. Skip attack 5, or start it with <code>python scripts/run_network.py</code>.</td></tr>
   <tr><td>"Reset" leaves a station stuck</td><td>Press <code>r</code> again; it re-runs Boot → Authorize → StartTransaction and resynchronises both sides.</td></tr>
+  <tr><td>CHN-02 not charging after the clone demo</td><td>Only Vellore was reset; CHN-02 is still presenting the copied card. Reset Chennai too: <code>python -m cli.attack -a r --control-url ws://localhost:9101/control</code>.</td></tr>
+  <tr><td>Running attack 5 a second time</td><td><code>TAG-CP-05</code> is already blocked, so cloning it again shows <span class="rule">R9_THREAT_INTEL</span> instead of <span class="rule">R8_TAG_CLONE</span>. Clone a different card (<code>-t TAG-CP-06</code>), or restart <code>python scripts/run_network.py</code> for a clean network; blocklists are held in memory.</td></tr>
 </table>
 
 <h2 class="pagebreak">Q&amp;A preparation</h2>
