@@ -5,7 +5,7 @@ relay (main.py) turns a RuleViolation into a schema ThreatEvent; keeping the
 rules free of I/O and of the wire schema is what makes them unit-testable.
 
 Trip table (CONTEXT.md §5.B):
-  R1_STATE_ORDER   MeterValues/StopTransaction with no live Authorize->StartTransaction
+  R1_STATE_ORDER   MeterValues/StopTransaction for a plug with no live transaction
   R2_PHYSICS       power_kw > 150.0, or power_kw > 60.0 while soc > 80.0, or power_kw < 0
   R3_OSCILLATION   >= 6 Start/Stop transitions fleet-wide in a 10 s window
   R4_SESSION_UNIQUE second handshake for a cpid with a live session
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from shared.schemas import StationStatus
-from proxy.state import ProxyState, StationState
+from proxy.state import ProxyState
 
 # R2 physics envelope constants (CONTEXT.md §5.B).
 MAX_POWER_KW = 150.0
@@ -165,13 +165,18 @@ def check_id_tag(
     return None
 
 
-def check_state_order(station: StationState, action: str) -> Optional[RuleViolation]:
-    """R1 — session-only actions require a live Authorize->StartTransaction."""
-    if action in _SESSION_ONLY_ACTIONS and not station.session_live:
+def check_state_order(label: str, session_live: bool, action: str) -> Optional[RuleViolation]:
+    """R1 — session-only actions require a live transaction on that plug.
+
+    "Live" means a StartTransaction the CSMS answered with a transactionId and
+    no StopTransaction since. A preceding Authorize is not required: it names no
+    connector, and OCPP 1.6 lets a charger authorise a card from its local list.
+    """
+    if action in _SESSION_ONLY_ACTIONS and not session_live:
         return RuleViolation(
             "R1_STATE_ORDER",
             "high",
-            f"{action} on {station.cpid} with no live transaction",
+            f"{action} on {label} with no live transaction",
         )
     return None
 
@@ -188,9 +193,9 @@ def check_session_unique(state: ProxyState, cpid: str) -> Optional[RuleViolation
 
 
 def check_txn_integrity(
-    state: ProxyState, cpid: str, transaction_id: Optional[int]
+    state: ProxyState, cpid: str, transaction_id: Optional[int], connector_id: Optional[int] = None
 ) -> Optional[RuleViolation]:
-    """R5 — MeterValues.transactionId must be known and owned by this cpid."""
+    """R5 — MeterValues.transactionId must be known and owned by this plug."""
     if transaction_id is None:
         return None
     owner = state.txn_owner.get(transaction_id)
@@ -198,28 +203,47 @@ def check_txn_integrity(
         return RuleViolation(
             "R5_TXN_INTEGRITY", "high", f"unknown transactionId {transaction_id}"
         )
-    if owner != cpid:
+    owner_cpid, owner_connector = owner
+    if owner_cpid != cpid:
         return RuleViolation(
             "R5_TXN_INTEGRITY",
             "high",
-            f"transactionId {transaction_id} belongs to {owner}, not {cpid}",
+            f"transactionId {transaction_id} belongs to {owner_cpid}, not {cpid}",
+        )
+    if connector_id is not None and owner_connector != connector_id:
+        return RuleViolation(
+            "R5_TXN_INTEGRITY",
+            "high",
+            f"transactionId {transaction_id} belongs to connector {owner_connector}, "
+            f"reported on connector {connector_id}",
         )
     return None
 
 
-def is_oscillation_transition(action: str, station_status: StationStatus) -> bool:
+# A restart this soon after a stop is part of a start/stop cycle; a new car
+# taking the plug (unplug, park, tap card) takes longer than this.
+RESTART_WINDOW_SEC = 5.0
+
+
+def is_oscillation_transition(
+    action: str, station_status: StationStatus, since_stop_sec: Optional[float] = None
+) -> bool:
     """R3 — does this frame count as a Start/Stop transition?
 
     A StopTransaction always does. A StartTransaction only counts when it is a
-    *re-start* (the station just stopped, so it sits in FINISHING) — the second
-    half of an oscillation cycle. The first StartTransaction of a session is not
-    a transition out of charging: counting it would trip R3 on normal fleet
-    startup, where 8 staggered stations start well inside the 10 s window.
+    rapid *re-start*: the plug just stopped (FINISHING) and, when the time since
+    that stop is known, within RESTART_WINDOW_SEC — the second half of an
+    oscillation cycle. The first StartTransaction of a session is not a
+    transition: counting it would trip R3 on normal fleet startup, where 8
+    staggered stations start well inside the 10 s window. Nor is the next car
+    starting on the same plug a minute later.
     """
     if action == "StopTransaction":
         return True
     if action == "StartTransaction":
-        return station_status == StationStatus.FINISHING
+        if station_status != StationStatus.FINISHING:
+            return False
+        return since_stop_sec is None or since_stop_sec <= RESTART_WINDOW_SEC
     return False
 
 

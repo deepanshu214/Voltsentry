@@ -51,27 +51,30 @@ def test_r2_negative_power_trips():
 
 
 # ------------------------------------------------------------- R1 state order
-# MeterValues / StopTransaction with no live Authorize->StartTransaction trips.
+# MeterValues / StopTransaction for a plug with no live transaction trips.
 
 def test_r1_metervalues_without_session_trips():
-    state = ProxyState()
-    st = state.station("CP-01")
-    v = check_state_order(st, "MeterValues")
+    v = check_state_order("CP-01", session_live=False, action="MeterValues")
     assert v is not None and v.rule_id == "R1_STATE_ORDER"
 
 
 def test_r1_metervalues_with_live_session_passes():
     state = ProxyState()
     state.apply_authorize("CP-01")
-    state.apply_start_transaction("CP-01", 1041)
-    st = state.station("CP-01")
-    assert check_state_order(st, "MeterValues") is None
+    plug = state.apply_start_transaction("CP-01", 1041)
+    assert check_state_order(plug.label, plug.session_live, "MeterValues") is None
+
+
+def test_r1_does_not_require_a_prior_authorize():
+    # OCPP 1.6 lets a charger authorise a card from its local list, so a
+    # CSMS-confirmed StartTransaction alone makes the session live.
+    state = ProxyState()
+    plug = state.apply_start_transaction("CP-01", 1041)
+    assert check_state_order(plug.label, plug.session_live, "MeterValues") is None
 
 
 def test_r1_stop_without_session_trips():
-    state = ProxyState()
-    st = state.station("CP-02")
-    v = check_state_order(st, "StopTransaction")
+    v = check_state_order("CP-02", session_live=False, action="StopTransaction")
     assert v is not None and v.rule_id == "R1_STATE_ORDER"
 
 

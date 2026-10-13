@@ -340,3 +340,67 @@ def test_residual_still_climbs_when_a_station_under_reports_power():
         energy_register_start_kwh=first.energy_register_start_kwh,
     )
     assert second.energy_residual_kwh == pytest.approx(115.0, abs=1e-6)
+
+
+# ---- fleet baseline, calibration and the shipped model -------------------
+# The shipped tier2.pkl is fitted on the fleet's own charging curve and its
+# scale is calibrated on held-out full honest sessions (train_tier2 --source
+# twin). These pin what that buys: no false alarm across a whole honest
+# session, and both data attacks still caught.
+
+from pathlib import Path  # noqa: E402
+
+from proxy.ml_engine import HONEST_WORST_SCORE, ML_ALERT_THRESHOLD, calibrate, fleet_baseline  # noqa: E402
+from shared.charging import cc_cv_power_kw  # noqa: E402
+
+SHIPPED_MODEL = Path(__file__).resolve().parent.parent / "proxy" / "models" / "tier2.pkl"
+
+
+def _scores(model, X):
+    raw = model.clf.decision_function(np.asarray(X, dtype=float))
+    return np.clip((model._d_max - raw) / model._span, 0.0, 1.0)
+
+
+def test_fleet_baseline_follows_the_fleet_curve_and_is_deterministic():
+    X = fleet_baseline()
+    assert X.shape[1] == len(FEATURE_ORDER)
+    assert np.array_equal(X, fleet_baseline())
+    soc, power = X[:, 1], X[:, 0]
+    cc = soc < 77.0
+    assert abs(np.median(power[cc]) - 120.0) < 1.0
+    near90 = (soc > 89.5) & (soc < 90.5)
+    assert abs(np.median(power[near90]) - cc_cv_power_kw(90.0)) < 2.0  # 58 kW entry, not 120
+
+
+def test_calibrate_puts_the_most_unusual_honest_sample_at_the_anchor():
+    model = fit_tier2(fleet_baseline())
+    honest = fleet_baseline(n=500, seed=7)
+    cal = calibrate(model, honest)
+    assert max(_scores(cal, honest)) == pytest.approx(HONEST_WORST_SCORE, abs=1e-9)
+
+
+def test_shipped_model_raises_no_alarm_across_whole_honest_sessions():
+    from proxy.train_tier2 import WARMUP, twin_session_vectors
+
+    model = Tier2Model.load(SHIPPED_MODEL)
+    for i, arrival in enumerate((16.0, 46.5, 79.0, 92.0)):  # fleet start, last fleet bay, the hand-off, deep CV
+        run = twin_session_vectors(arrival, seed=200 + i)
+        assert _scores(model, run["vectors"][WARMUP:]).max() < ML_ALERT_THRESHOLD
+
+
+def test_shipped_model_accepts_an_old_honest_cv_session():
+    # Seen live before the fix: 99 min into a session, 95 % SoC, 5.8 kW. With the
+    # meter counting real time the residual stays ~0, and the taper is honest.
+    model = Tier2Model.load(SHIPPED_MODEL)
+    assert model.score([5.8, 95.3, 0.0, 5948.0, 0.004]) < ML_ALERT_THRESHOLD
+
+
+def test_shipped_model_still_catches_drift_and_spoof_below_80_percent():
+    from proxy.train_tier2 import twin_session_vectors
+
+    model = Tier2Model.load(SHIPPED_MODEL)
+    for kind, limit_sec in (("subtle_drift", 15.0), ("meter_spoof", 2.0)):
+        run = twin_session_vectors(30.0, seed=11, attack=kind, attack_soc=50.0)
+        s = _scores(model, run["vectors"])
+        first = next(j for j in range(run["attack_index"], len(s)) if s[j] > ML_ALERT_THRESHOLD)
+        assert run["t"][first] - run["attack_t"] <= limit_sec

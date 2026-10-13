@@ -1,22 +1,15 @@
 import math
 
-# Power the CV phase enters at, in kW. The proxy's R2 rule (CONTEXT.md 5.B)
-# treats anything over 60 kW above 80% SoC as a physics violation, and
-# CONTEXT.md 5.C pins constant current all the way to the 80% knee. Those two
-# together mean the CC->CV transition has to be a step down rather than a
-# continuation from max power: an exponential decaying from 120 kW sits above
-# 60 kW until ~88.7% SoC, so every honest station in the fleet quarantined
-# itself on a false positive as it crossed 80%.
-CV_ENTRY_KW = 58.0
-CV_TAPER_K = 0.15
-
-# Where the hand-off into CV begins. Power has to be under CV_ENTRY_KW by the
-# time SoC crosses 80, and doing that in one tick spikes dp_dt hard enough for
-# the Tier-2 forest to score it 0.81 -- a false ML badge on every clean station
-# at the knee. Easing it in over the last couple of percent keeps dp_dt in the
-# same range as the honest taper the model was fitted on.
-CC_END_SOC = 78.0
-CV_KNEE_SOC = 80.0
+# The honest charging curve (CC to 78 %, eased hand-off to 58 kW by 80 %, CV
+# taper) lives in shared/charging.py, where the Tier-2 trainer reads it too.
+from shared.charging import (  # noqa: E402
+    CC_END_SOC,
+    CV_ENTRY_KW,
+    CV_KNEE_SOC,
+    CV_TAPER_K,
+    PACK_CAPACITY_KWH,
+    cc_cv_power_kw,
+)
 
 # Pack electrical model. An 800 V-class pack (192 NMC cells in series) is what
 # makes 120 kW plausible on a standard CCS2 cable: ~170 A at ~700 V, inside the
@@ -64,7 +57,7 @@ class Battery:
 
     def __init__(
         self,
-        capacity_kwh: float = 75.0,
+        capacity_kwh: float = PACK_CAPACITY_KWH,
         max_power_kw: float = 120.0,
         initial_soc: float = 20.0,
         target_soc: float = 100.0,
@@ -80,23 +73,7 @@ class Battery:
     @property
     def power_kw(self) -> float:
         """Calculate instant charging power based on CC-CV curve."""
-        if self.soc >= self.target_soc or self.soc >= 100.0:
-            return 0.0
-        
-        cv_entry = min(self.max_power_kw, CV_ENTRY_KW)
-
-        if self.soc <= CC_END_SOC:
-            # Constant Current / Constant Power phase
-            return self.max_power_kw
-
-        if self.soc <= CV_KNEE_SOC:
-            # Hand-off: decay from max power to the CV entry power so that the
-            # station is already under R2's 60 kW ceiling when it crosses 80%.
-            k = math.log(self.max_power_kw / cv_entry) / (CV_KNEE_SOC - CC_END_SOC)
-            return self.max_power_kw * math.exp(-k * (self.soc - CC_END_SOC))
-
-        # Constant Voltage exponential taper, decaying toward zero by 100%.
-        return cv_entry * math.exp(-CV_TAPER_K * (self.soc - CV_KNEE_SOC))
+        return cc_cv_power_kw(self.soc, self.max_power_kw, self.target_soc)
 
     def tick(self, dt: float) -> tuple[float, float, float]:
         """

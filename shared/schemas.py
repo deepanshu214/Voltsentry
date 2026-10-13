@@ -42,6 +42,7 @@ class AttackType(str, Enum):
 class TelemetryEvent(BaseModel):
     event: Literal["telemetry"] = "telemetry"
     station_id: str                       # "CP-04" == OCPP chargePointId
+    connector_id: Optional[int] = None    # plug on that charger (1, 2, ...); None = 1
     transaction_id: Optional[int] = None
     ts: float                             # proxy receive clock, unix epoch seconds
     power_kw: float
@@ -63,6 +64,7 @@ class TelemetryEvent(BaseModel):
 class ThreatEvent(BaseModel):
     event: Literal["threat"] = "threat"
     station_id: str
+    connector_id: Optional[int] = None    # plug the finding concerns, when it is one plug
     ts: float
     tier: Literal[1, 2]
     rule_id: Optional[str] = None         # "R2_PHYSICS" etc, tier 1 only
@@ -75,6 +77,31 @@ class ThreatEvent(BaseModel):
     # Set only in monitor mode: what enforce mode would have done. action_taken
     # is then "logged", because nothing was blocked.
     recommended_action: Optional[Literal["frame_dropped", "quarantined"]] = None
+
+
+class DefenceStats(BaseModel):
+    """What this node's defences have done since it started, and how it is set up (v3).
+
+    Counters are since process start. frames_dropped counts charger frames held
+    back from the CSMS because of a detection (a forged reading, a cloned card,
+    anything a quarantined charger sends before it is cut off).
+    """
+
+    frames_inspected: int = 0
+    frames_forwarded: int = 0
+    frames_dropped: int = 0
+    quarantines: int = 0
+    cards_blocked: int = 0
+    duplicate_sessions_refused: int = 0       # R4
+    blocklisted_chargers_refused: int = 0     # R9 at handshake
+    oversize_frames_refused: int = 0          # close 1009
+    malformed_connections_refused: int = 0    # no /ocpp/{cpid} in the path
+    threats_recorded: int = 0
+    ingress_tls: bool = False                 # chargers connect over wss://
+    bind: str = "localhost"
+    max_frame_kb: int = 64
+    federation: Literal["standalone", "connected", "disconnected"] = "standalone"
+    federation_dev_key: bool = False          # running on the development node key
 
 
 class GridEvent(BaseModel):
@@ -104,6 +131,7 @@ class GridEvent(BaseModel):
     lt_current_a: Optional[float] = None      # per-phase line current
     frequency_hz: Optional[float] = None      # measured supply frequency
     enforcement: Optional[Literal["enforce", "monitor"]] = None  # this node's mode
+    defences: Optional[DefenceStats] = None   # v3: what this node blocked, and its set-up
 
 
 # --------------------------------------------------------------------------

@@ -262,9 +262,9 @@
     <table>
       <tr><th>Key</th><th>Attack</th><th>What the judge sees</th><th>Caught by</th></tr>
       <tr><td class="q">1</td><td>meter_spoof</td><td class="q">CP-03 reports 5 kW but its own meter says 718 V × 167 A = 120 kW → quarantined on the first frame</td><td class="rid">R7 (+R6, ML)</td></tr>
-      <tr><td class="q">2</td><td>fleet_oscillate</td><td class="q">1 Hz start/stop across the fleet → transformer gauge swings → fleet-wide badge</td><td class="rid">R3</td></tr>
+      <tr><td class="q">2</td><td>fleet_oscillate</td><td class="q">every bay stops and starts together once a second → transformer swings 82 % ↔ 0 % → fleet-wide badge</td><td class="rid">R3</td></tr>
       <tr><td class="q">3</td><td>session_shadow</td><td class="q">duplicate handshake on a live cpid → shadow socket refused at the handshake</td><td class="rid">R4</td></tr>
-      <tr><td class="q">4</td><td>subtle_drift</td><td class="q">−2%/tick under-report, every value consistent → <b>no rule fires</b> → Risk Index past 0.65 ~17 s in; R6 ~25 s later</td><td class="rid">Tier-2 first</td></tr>
+      <tr><td class="q">4</td><td>subtle_drift</td><td class="q">−2%/tick under-report, every value consistent → <b>no rule fires</b> → Risk Index past 0.65 ~10 s in; R6 ~35 s later</td><td class="rid">Tier-2 first</td></tr>
       <tr><td class="q">5</td><td>tag_clone</td><td class="q">a Chennai bay presents a card still charging in Vellore → Authorize answered Blocked; Vellore alerted</td><td class="rid">R8 + R9</td></tr>
       <tr><td class="q">r</td><td>reset</td><td class="q">clears quarantine, reconnects the fleet clean — ready for the next attack</td><td>—</td></tr>
     </table>
@@ -308,7 +308,7 @@
     <div class="kicker">Where it stands</div>
     <h2>Measured, not asserted.</h2>
     <div class="stats">
-      <div class="stat"><div class="n healthy">150</div><div class="l">automated tests passing — rules, ML, OCPP units, electrical model, pipeline, federation over real sockets</div></div>
+      <div class="stat"><div class="n healthy">184</div><div class="l">automated tests passing — rules, ML, OCPP units, electrical model, pipeline, federation over real sockets</div></div>
       <div class="stat"><div class="n active">~16 µs</div><div class="l">Tier-1 per MeterValues frame (11 readings, ~1 KB), mean; p99 ~19 µs over 200k frames</div></div>
       <div class="stat"><div class="n warn">9 + 2</div><div class="l">deterministic rules live, plus a two-model Tier-2 (Isolation Forest + CUSUM)</div></div>
     </div>

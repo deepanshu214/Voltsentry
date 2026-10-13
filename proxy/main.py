@@ -34,9 +34,9 @@ from websockets.client import connect
 from websockets.server import serve
 
 from shared import electrical as el
-from shared.schemas import GridEvent, ThreatEvent
+from shared.schemas import DefenceStats, GridEvent, ThreatEvent
 from proxy import ocpp, pipeline, rules
-from proxy.state import ProxyState
+from proxy.state import ProxyState, connector_label
 
 OCPP_SUBPROTOCOL = "ocpp1.6"
 GRID_TICK_SEC = 1.0
@@ -114,7 +114,27 @@ STATE = ProxyState()
 OSCILLATION = rules.OscillationDetector()
 CFG: Config = None  # type: ignore[assignment]  # set in main()
 FED: Any = None     # federation.client.FederationClient when --hub-url is set
+FED_DEV_KEY = False  # the node is signing with the development key
 STARTED = time.time()
+
+
+@dataclass
+class DefenceCounters:
+    """What the defences have done since start; published as GridEvent.defences."""
+
+    frames_inspected: int = 0
+    frames_forwarded: int = 0
+    frames_dropped: int = 0
+    quarantines: int = 0
+    cards_blocked: int = 0
+    duplicate_sessions_refused: int = 0
+    blocklisted_chargers_refused: int = 0
+    oversize_frames_refused: int = 0
+    malformed_connections_refused: int = 0
+    threats_recorded: int = 0
+
+
+DEFENCES = DefenceCounters()
 
 
 def log(msg: str) -> None:
@@ -154,6 +174,7 @@ FEED = FeedHub()
 async def emit(event) -> None:
     """Every event leaves through here: stamped with this node, shared if a threat."""
     if isinstance(event, ThreatEvent):
+        DEFENCES.threats_recorded += 1
         if FED is not None:
             FED.publish_threat(event.model_dump())
     await FEED.broadcast(event)
@@ -180,17 +201,36 @@ async def _quarantine_deadline(charger, cpid: str) -> None:
 
 
 async def _pump_upstream(charger, csms, cpid: str) -> None:
+    try:
+        await _relay_upstream(charger, csms, cpid)
+    except websockets.ConnectionClosed as exc:
+        # websockets fails the connection with 1009 when a frame is over max_size.
+        if exc.sent is not None and exc.sent.code == 1009:
+            DEFENCES.oversize_frames_refused += 1
+            log(f"{cpid} sent a frame over {MAX_OCPP_FRAME_BYTES // 1024} KB; connection refused (1009)")
+        raise
+
+
+async def _relay_upstream(charger, csms, cpid: str) -> None:
     async for raw in charger:
+        DEFENCES.frames_inspected += 1
         verdict = await pipeline.inspect_upstream(STATE, OSCILLATION, cpid, raw, emit)
+        if verdict.card_blocked:
+            DEFENCES.cards_blocked += 1
+        if not verdict.forward and not verdict.close:
+            DEFENCES.frames_dropped += 1
         if verdict.reply is not None:
             await charger.send(verdict.reply)
         if verdict.start_quarantine:
+            # connectorId 0 is the whole charge point: a charger whose meter lies
+            # is compromised on every plug, not just the one that reported.
             ca = ocpp.serialise_call(
                 "ChangeAvailability",
-                {"connectorId": 1, "type": "Inoperative"},
+                {"connectorId": 0, "type": "Inoperative"},
                 unique_id=verdict.change_availability_uid,
             )
             log(f"{cpid} QUARANTINE -> ChangeAvailability(Inoperative)")
+            DEFENCES.quarantines += 1
             await charger.send(ca)
             if FED is not None:
                 FED.publish_ioc("charge_point", cpid, verdict.quarantine_reason or "quarantined",
@@ -202,6 +242,7 @@ async def _pump_upstream(charger, csms, cpid: str) -> None:
             await charger.close(code=4001, reason="quarantined")
             return
         if verdict.forward:
+            DEFENCES.frames_forwarded += 1
             await csms.send(raw)
 
 
@@ -214,6 +255,7 @@ async def _pump_downstream(csms, charger, cpid: str) -> None:
 async def _handle_charger(charger) -> None:
     cpid = _cpid_from_path(charger.path)
     if cpid is None:
+        DEFENCES.malformed_connections_refused += 1
         await charger.close(code=1008, reason="expected /ocpp/{cpid}")
         return
 
@@ -224,6 +266,7 @@ async def _handle_charger(charger) -> None:
             v = rules.RuleViolation("R9_THREAT_INTEL", "high", f"charge point on federation blocklist: {blocked}")
             await pipeline.raise_threat(cpid, v, None, emit, action_taken="quarantined")
             if pipeline.ENFORCE:
+                DEFENCES.blocklisted_chargers_refused += 1
                 await charger.close(code=4003, reason="blocked by threat intelligence")
                 return
 
@@ -231,6 +274,7 @@ async def _handle_charger(charger) -> None:
     shadow = rules.check_session_unique(STATE, cpid)
     if shadow is not None:
         await pipeline.raise_threat(cpid, shadow, None, emit)
+        DEFENCES.duplicate_sessions_refused += 1
         await charger.close(code=4001, reason="duplicate session")
         return
 
@@ -302,6 +346,23 @@ def grid_event() -> GridEvent:
         lt_current_a=round(el.line_current_a(kva, v_ll or el.LT_NOMINAL_LL_V), 1),
         frequency_hz=round(snap.frequency_hz, 3) if snap.frequency_hz is not None else None,
         enforcement=CFG.mode,
+        defences=defence_stats(),
+    )
+
+
+def defence_stats() -> DefenceStats:
+    """The counters plus how this node is set up, for the dashboard's Defences tab."""
+    if FED is None:
+        federation = "standalone"
+    else:
+        federation = "connected" if FED.connected else "disconnected"
+    return DefenceStats(
+        **vars(DEFENCES),
+        ingress_tls=bool(CFG.tls_cert),
+        bind=CFG.bind,
+        max_frame_kb=MAX_OCPP_FRAME_BYTES // 1024,
+        federation=federation,
+        federation_dev_key=FED_DEV_KEY,
     )
 
 
@@ -336,13 +397,14 @@ async def _on_federation_message(kind: str, body: dict) -> None:
     if kind != "ioc" or body.get("source_node") == CFG.node_id:
         return
     if body.get("kind") == "id_tag":
-        for id_tag, cpid in STATE.live_sessions():
+        for id_tag, cpid, connector_id in STATE.live_cards():
             if FED.card_hash(id_tag) == body.get("value"):
                 v = rules.RuleViolation(
                     "R9_THREAT_INTEL", "high",
-                    f"card charging on {cpid} was flagged elsewhere: {body.get('reason', '')}",
+                    f"card charging on {connector_label(cpid, connector_id)} was flagged elsewhere: "
+                    f"{body.get('reason', '')}",
                 )
-                await pipeline.raise_threat(cpid, v, None, emit, action_taken="logged")
+                await pipeline.raise_threat(cpid, v, None, emit, action_taken="logged", connector_id=connector_id)
     elif body.get("kind") == "charge_point" and body.get("value") in STATE.live_connections:
         cpid = body["value"]
         v = rules.RuleViolation(
@@ -387,8 +449,10 @@ def _start_federation(cfg: Config):
     from federation.client import FederationClient
     from federation.protocol import DEV_MASTER_SECRET, derive_node_key
 
+    global FED_DEV_KEY
     key = cfg.fed_key
     if not key:
+        FED_DEV_KEY = True
         key = derive_node_key(DEV_MASTER_SECRET, cfg.node_id)
         log("WARNING: no --fed-key; using the development key. Issue real keys with python -m federation.keys.")
     hub_ssl = None

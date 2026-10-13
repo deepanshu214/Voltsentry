@@ -87,7 +87,7 @@
   <tr><td class="t">0:50</td><td>Deck slide 5–9</td><td>Architecture, real units (the 230 V vs 415 V answer), the multi-site network, then the two detection tiers. Land "the residual feature."</td></tr>
   <tr><td class="t">1:45</td><td>Dashboard</td><td>Switch to the live NOC. Fleet charging.</td></tr>
   <tr><td class="t">2:00</td><td>Dashboard</td><td>Press <code>1</code> — meter_spoof. CP-03 quarantined.</td></tr>
-  <tr><td class="t">2:30</td><td>Dashboard</td><td><code>r</code> then <code>2</code> — oscillation. Transformer gauge swings.</td></tr>
+  <tr><td class="t">2:30</td><td>Dashboard</td><td><code>r</code> then <code>2</code> — oscillation. Transformer load swings 82 % ↔ 0 % every second.</td></tr>
   <tr><td class="t">2:55</td><td>Dashboard</td><td><code>r</code> then <code>3</code> — session shadow. Handshake refused.</td></tr>
   <tr><td class="t">3:15</td><td>Dashboard</td><td><code>r</code> then <code>4</code> — subtle drift. <b>No rule fires.</b> Risk Index climbs past 0.65.</td></tr>
   <tr><td class="t">3:35</td><td>Dashboard</td><td>Attack 5 — card clone across sites; show the <b>Multi-Site Network</b> tab. (Only if the two-site network is running.)</td></tr>
@@ -194,7 +194,7 @@
 
 <h3>Attack 2 — <code>r</code>, then <code>2</code> — fleet_oscillate</h3>
 <table>
-  <tr><th>Expected</th><td>All stations begin rapid start/stop. The transformer load gauge visibly swings. After ≥ 6 transitions in 10 s → <span class="rule">R3_OSCILLATION</span> fires fleet-wide (one badge, not eight).</td></tr>
+  <tr><th>Expected</th><td>Every bay stops and starts together, once a second. The site transformer swings between ~82 % load (about 1,020 kVA) and 0 % every second, and the bay cards flip between <b>Charging</b> 120 kW and <b>Finishing</b> 0 kW. After ≥ 6 transitions in 10 s → <span class="rule">R3_OSCILLATION</span> fires fleet-wide (one badge, not eight), about 1–2 s in.</td></tr>
 </table>
 <div class="say"><ul>
   <li>"This is a coordinated attack — synchronised start/stop across the cluster to swing local load and trip a distribution transformer."</li>
@@ -213,13 +213,13 @@
 
 <h3>Attack 4 — <code>r</code>, then <code>4</code> — subtle_drift <span class="sub">(the pitch)</span></h3>
 <table>
-  <tr><th>Expected</th><td>One station under-reports power by a compounding ~2% per tick, and scales its current to match, so every reading agrees with every other. <b>No Tier-1 rule fires</b>. The Risk Index crosses 0.65 about <b>17 s</b> in (measured) → amber <b>ML ANOMALY</b> badge. About 25 s later the residual is big enough for <span class="rule">R6_METER_FRAUD</span> to quarantine it.</td></tr>
+  <tr><th>Expected</th><td>One station under-reports power by a compounding ~2% per tick, and scales its current to match, so every reading agrees with every other. <b>No Tier-1 rule fires</b>. The Risk Index crosses 0.65 about <b>10 s</b> in (measured) → amber <b>ML ANOMALY</b> badge. About 35 s later (~44 s in) the residual is big enough for <span class="rule">R6_METER_FRAUD</span> to quarantine it.</td></tr>
 </table>
 <div class="say"><ul>
   <li>"Every number this station is sending is inside spec. No rule can touch it."</li>
   <li>"But the energy residual is climbing, and the model sees it. Watch the Risk Index — there it goes past the line. That's the attack a threshold engine can't catch, caught."</li>
 </ul></div>
-<div class="fallback">Keep talking for the ~17 s; the amber badge is the moment. If it lands while you are mid-sentence, point back at it: <i>"there — the model flagged it, no rule involved."</i> The R6 quarantine that follows confirms it.</div>
+<div class="fallback">Keep talking for the ~10 s; the amber badge is the moment. If it lands while you are mid-sentence, point back at it: <i>"there — the model flagged it, no rule involved."</i> The R6 quarantine that follows confirms it.</div>
 
 <h3>Attack 5 — card clone <span class="sub">(needs the two-site network: <code>python scripts/run_network.py</code>)</span></h3>
 <table>
@@ -271,6 +271,12 @@
 <h3>"How do several VoltSentry servers work together?"</h3>
 <p>Each charging site runs its own VoltSentry node beside its chargers, and every node dials out to a federation hub. The hub relays threats and blocklists between sites and keeps a table of which RFID cards are charging where, as salted hashes. A charger quarantined in Vellore is refused if it shows up in Chennai, and a card charging in two places at once is blocked. If the hub goes down, each site keeps protecting itself; the queued intel is delivered when it returns. We tested forged keys, impersonation and replayed messages: all refused.</p>
 
+<h3>"What firewall are you using?"</h3>
+<p><b>Show: the Defences tab.</b> VoltSentry <i>is</i> the firewall: an application-level firewall that reads OCPP, built by us in Python, no third-party product. A network firewall decides by address and port, so it cannot see a charger reporting 5 kW while drawing 120 kW; VoltSentry reads inside every message and holds back the forged ones. The diagram at the top shows where it sits — chargers → the site's own network firewall → VoltSentry → CSMS — with live counts of messages inspected, forwarded and held back. A real site uses both firewalls; in the laptop demo there is no network firewall.</p>
+
+<h3>"Apart from quarantine, what other safeguards do you have?"</h3>
+<p><b>Show: the Defences tab, scroll down.</b> One card per safeguard, with its live count: duplicate connections refused (R4), blocklisted chargers refused (R9), oversized messages refused (64 KB), malformed connections refused, forged messages held back from the CSMS, cloned cards answered <i>Blocked</i>, signed site links (HMAC-SHA256, per-site keys), replay protection, card numbers shared only as salted hashes, a blocklist that expires, monitor mode and the forensic log. TLS is available but off on the laptop (the card says "lab set-up"). Charger passwords/certificates and real console login are shown as <b>planned</b> — say so before you are asked.</p>
+
 <h3>"How is this different from a web application firewall?"</h3>
 <p>A WAF doesn't speak OCPP. VoltSentry enforces the <b>session state machine</b> (you can't send meter values before you're authorised), <b>physical invariants</b> (power can't exceed the charger's rating), and <b>energy conservation</b> across a session. Those are domain rules a generic firewall has no concept of.</p>
 
@@ -278,7 +284,7 @@
 <p>It requires <i>both</i> a meaningful accumulated residual <i>and</i> a residual that is still climbing fast right now. A brief measurement wobble produces neither. Sustained under-reporting produces both, and the gap only widens.</p>
 
 <h3>"What's your false-positive rate?"</h3>
-<p>Be honest: the current benchmark is on a small recorded fixture, so the FPR figure isn't meaningful yet. The design target is zero Tier-1 false positives (they're deterministic invariants) and Tier-2 tuned against a real dataset — ACN-Data or ElaadNL — before any production claim. The harness to measure it exists; the dataset is the next step.</p>
+<p>On the simulated fleet: none of 28 full honest sessions (from arrival to 100 %, up to 2 hours each) crossed 0.65, and a 25-minute live run with every car going through the 80 % hand-off raised no alarm. That took a fix: the first model was trained only on full-power charging and flagged every honest car above 80 %; it is now trained on the whole charging curve and its scale is calibrated on separate honest sessions. Be honest about the rest: on <b>real</b> data the rate is not measured yet. Tier-1 rules are physical and protocol invariants, so an honest charger should not trip them; Tier-2 needs re-fitting on a real dataset (ACN-Data or ElaadNL), and monitor mode exists so a site can measure it on its own meters before blocking anything.</p>
 
 <h3>"Who buys this, and how is it deployed?"</h3>
 <p>Charge-point operators (CPOs) and CSMS vendors. It deploys as an ingress sidecar in front of the existing CSMS — no charger firmware change, no backend change. That's the entire commercial pitch: security you can add without touching the fleet.</p>

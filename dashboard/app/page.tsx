@@ -22,7 +22,7 @@ import { SettingsView } from "../components/SettingsView";
 import {
   Icon3DShield,
 } from "../components/3dIcons";
-import { Play, Volume2, Radio, Zap, Download, ShieldAlert, User, Settings, LayoutDashboard, Globe, Box, Loader2, LogOut, Network, Activity, Layers, Minus, Plus, Gauge, Cpu } from "lucide-react";
+import { Play, Volume2, Radio, Zap, Download, ShieldAlert, ShieldCheck, User, Settings, LayoutDashboard, Globe, Box, Loader2, LogOut, Network, Activity, Layers, Minus, Plus, Gauge, Cpu } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { RequireAuth, useAuth } from "../context/AuthContext";
 
@@ -69,6 +69,16 @@ const NetworkTopology = dynamic(() => import("../components/NetworkTopology"), {
   ),
 });
 
+/** What VoltSentry blocks and how the site is set up; reads the hub feed while mounted. */
+const DefencesPanel = dynamic(() => import("../components/DefencesPanel"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[360px] w-full items-center justify-center rounded-2xl border border-volt-line bg-volt-bg">
+      <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
+    </div>
+  ),
+});
+
 /** Multi-site federation view; only opens a socket to the hub while mounted. */
 const FederationNetwork = dynamic(() => import("../components/FederationNetwork"), {
   ssr: false,
@@ -80,7 +90,7 @@ const FederationNetwork = dynamic(() => import("../components/FederationNetwork"
 });
 
 type ViewState = "landing" | "noc" | "account" | "settings";
-type NocTab = "all" | "grid" | "fleet" | "twin3d" | "topology" | "network" | "threats";
+type NocTab = "all" | "grid" | "fleet" | "twin3d" | "topology" | "network" | "defences" | "threats";
 
 // The stations the twin actually runs a live socket for.
 const LIVE_STATIONS = ["CP-01", "CP-02", "CP-03", "CP-04", "CP-05", "CP-06", "CP-07", "CP-08"];
@@ -494,6 +504,18 @@ export default function App() {
                 </button>
 
                 <button
+                  onClick={() => setNocTab("defences")}
+                  className={`px-3.5 py-2 rounded-xl transition-all flex items-center space-x-2 font-bold ${
+                    nocTab === "defences"
+                      ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 shadow-sm"
+                      : "text-slate-400 hover:text-white bg-black/40 border border-transparent"
+                  }`}
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>DEFENCES</span>
+                </button>
+
+                <button
                   onClick={() => setNocTab("threats")}
                   className={`px-3.5 py-2 rounded-xl transition-all flex items-center space-x-2 font-bold ${
                     nocTab === "threats"
@@ -585,6 +607,22 @@ export default function App() {
                   </div>
                 </div>
                 <FederationNetwork />
+              </div>
+            )}
+
+            {/* Defences: where the firewall sits and every safeguard, with live counters. */}
+            {nocTab === "defences" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between pt-2">
+                  <h2 className="text-xl font-black text-slate-100 flex items-center space-x-3">
+                    <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                    <span>VoltSentry Defences</span>
+                  </h2>
+                  <div className="text-xs font-mono text-slate-300 bg-black/60 px-3 py-1 rounded-lg border border-white/15">
+                    This console: <span className="text-slate-100 font-medium">{grid?.node_id ?? "standalone"}</span>
+                  </div>
+                </div>
+                <DefencesPanel grid={grid} threats={threats} live={mode === "live"} />
               </div>
             )}
 

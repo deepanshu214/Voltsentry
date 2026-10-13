@@ -70,6 +70,28 @@ export interface GridEvent {
   frequency_hz?: number | null;
   /** "monitor": detections are reported, nothing is blocked. */
   enforcement?: "enforce" | "monitor" | null;
+  /** v3: what this node's defences have done since it started, and how it is set up. */
+  defences?: DefenceStats | null;
+}
+
+/** Mirrors shared/schemas.py DefenceStats. Counters are since the proxy started. */
+export interface DefenceStats {
+  frames_inspected: number;
+  frames_forwarded: number;
+  /** Charger frames held back from the CSMS because of a detection. */
+  frames_dropped: number;
+  quarantines: number;
+  cards_blocked: number;
+  duplicate_sessions_refused: number;
+  blocklisted_chargers_refused: number;
+  oversize_frames_refused: number;
+  malformed_connections_refused: number;
+  threats_recorded: number;
+  ingress_tls: boolean;
+  bind: string;
+  max_frame_kb: number;
+  federation: "standalone" | "connected" | "disconnected";
+  federation_dev_key: boolean;
 }
 
 export type FeedEvent = TelemetryEvent | ThreatEvent | GridEvent;

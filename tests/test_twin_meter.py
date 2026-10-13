@@ -127,7 +127,9 @@ class _ScriptedCsms:
 
     async def __call__(self, action, payload):
         self.calls.append((action, payload))
-        return {"idTagInfo": {"status": self.auth_statuses.pop(0)}}
+        if action == "Authorize":
+            return {"idTagInfo": {"status": self.auth_statuses.pop(0)}}
+        return {"transactionId": 4242, "idTagInfo": {"status": "Accepted"}}
 
 
 @pytest.mark.asyncio
@@ -135,8 +137,13 @@ async def test_a_blocked_own_card_is_replaced_and_the_bay_charges(monkeypatch):
     monkeypatch.setattr("simulator.twin.CARD_REISSUE_SEC", 0.0)
     bay = _charging_bay()
     bay.call = csms = _ScriptedCsms(["Blocked", "Accepted"])
-    await bay._authorize()
-    assert [p["idTag"] for _, p in csms.calls] == ["TAG-CP-01", "TAG-CP-01-R1"]
+    await bay._start(bay.plug, "[test]")
+    tried = [p["idTag"] for a, p in csms.calls if a == "Authorize"]
+    assert tried == ["TAG-CP-01", "TAG-CP-01-R1"]
+    start = [p for a, p in csms.calls if a == "StartTransaction"][0]
+    assert start["idTag"] == "TAG-CP-01-R1" and bay.plug.charging
+    # the replacement survives a reset: the old card is still blocked network-wide
+    bay.plug.new_car(40.0)
     assert bay.id_tag == "TAG-CP-01-R1"
 
 
@@ -146,20 +153,87 @@ async def test_a_bay_presenting_a_cloned_card_keeps_retrying_it(monkeypatch):
     bay = _charging_bay()
     bay.id_tag_override = "TAG-CP-05"
     bay.call = csms = _ScriptedCsms(["Blocked", "Blocked", "Accepted"])
-    await bay._authorize()
-    assert [p["idTag"] for _, p in csms.calls] == ["TAG-CP-05"] * 3 and bay.card_issue == 0
-
-
-def test_a_replacement_card_survives_a_reset():
-    fleet = FleetManager("ws://x", station_count=6)
-    bay = fleet.stations["CP-05"]
-    bay.reissue_card()
-    fleet.apply_trigger(AttackTrigger(attack_type=AttackType.RESET))
-    assert bay.id_tag == "TAG-CP-05-R1"  # the old card is still blocked network-wide
+    await bay._start(bay.plug, "[test]")
+    tried = [p["idTag"] for a, p in csms.calls if a == "Authorize"]
+    assert tried == ["TAG-CP-05"] * 3 and bay.plug.card_issue == 0
 
 
 def test_replacement_cards_stay_within_the_ocpp_idtag_limit():
-    bay = FleetManager("ws://x", station_count=6, prefix="CHN").stations["CHN-06"]
+    fleet = FleetManager("ws://x", station_count=6, prefix="CHN", connectors=2)
+    plug = fleet.stations["CHN-06"].connectors[2]
     for _ in range(12):
-        bay.reissue_card()
-    assert bay.id_tag == "TAG-CHN-06-R12" and len(bay.id_tag) <= 20
+        plug.reissue_card()
+    assert plug.id_tag == "TAG-CHN-06-2-R12" and len(plug.id_tag) <= 20
+
+
+# ---- the meter counts real time; oscillation really swings the load ------
+
+class _FakeClock:
+    def __init__(self, *readings):
+        self.readings = list(readings)
+
+    def __call__(self):
+        return self.readings.pop(0) if len(self.readings) > 1 else self.readings[0]
+
+
+def test_the_meter_counts_real_time_between_ticks(monkeypatch):
+    # The loop sleeps 1 s and then waits for the CSMS, so a turn takes ~1.03 s.
+    # Counting it as 1 s let the register fall 2-3 % behind the reported power,
+    # which looked like meter fraud on an honest charger.
+    bay = _charging_bay()
+    monkeypatch.setattr("simulator.twin.time.monotonic", _FakeClock(100.0, 101.031, 102.058))
+    assert bay.plug.elapsed() == 1.0                       # first tick of a session
+    assert bay.plug.elapsed() == pytest.approx(1.031)
+    assert bay.plug.elapsed() == pytest.approx(1.027)
+    bay.plug.new_car(20.0)
+    assert bay.plug.last_tick is None                      # a new car starts its own clock
+
+
+@pytest.mark.asyncio
+async def test_oscillation_swings_between_full_power_and_nothing(monkeypatch):
+    async def at_once(_delay):
+        return None
+
+    monkeypatch.setattr("simulator.twin.asyncio.sleep", at_once)
+    # Even seconds off, odd seconds on: the clock reads just before each boundary.
+    monkeypatch.setattr("simulator.twin.time.time", _FakeClock(999.4, 1000.4, 1001.4))
+    bay = _charging_bay(mode="oscillate")
+    plug = bay.plug
+    plug.charging = True
+    plug.actual_power_kw = 120.0
+    bay.call = csms = _ScriptedCsms([])
+
+    await bay._oscillate_switch(plug, "[test]")            # off
+    assert [a for a, _ in csms.calls] == ["StopTransaction"]
+    assert not plug.charging and plug.actual_power_kw == 0.0
+    assert bay.site.load_kva() == 0.0
+
+    await bay._oscillate_switch(plug, "[test]")            # on, at full power, reported honestly
+    assert [a for a, _ in csms.calls][1:] == ["StartTransaction", "MeterValues"]
+    assert plug.charging and plug.actual_power_kw == pytest.approx(120.0)
+    mv = extract_meter_values(csms.calls[-1][1])
+    assert mv["power_kw"] == pytest.approx(120.0)
+    assert bay.site.load_kva() == pytest.approx(el.bay_peak_kva(), rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_oscillating_bays_stay_in_step_whenever_they_join(monkeypatch):
+    async def at_once(_delay):
+        return None
+
+    monkeypatch.setattr("simulator.twin.asyncio.sleep", at_once)
+    late, early = _charging_bay(mode="oscillate"), _charging_bay(mode="oscillate")
+    for bay in (late, early):
+        bay.plug.charging = True
+        bay.call = _ScriptedCsms([])
+    # `early` noticed the attack in second 1000, `late` only in second 1001.
+    monkeypatch.setattr("simulator.twin.time.time", _FakeClock(999.9))
+    await early._oscillate_switch(early.plug, "[test]")    # boundary 1000: even -> off
+    monkeypatch.setattr("simulator.twin.time.time", _FakeClock(1000.9))
+    await early._oscillate_switch(early.plug, "[test]")    # boundary 1001: odd -> on
+    await late._oscillate_switch(late.plug, "[test]")      # joins at 1001: already on, no change
+    assert early.plug.charging and late.plug.charging
+    monkeypatch.setattr("simulator.twin.time.time", _FakeClock(1001.9))
+    await early._oscillate_switch(early.plug, "[test]")
+    await late._oscillate_switch(late.plug, "[test]")      # boundary 1002: both off together
+    assert not early.plug.charging and not late.plug.charging

@@ -131,15 +131,16 @@ Timings measured on the running stack (the bundled replay is that recording).
 | CLI | Attack | Detection |
 | :--- | :--- | :--- |
 | `-a 1 -s CP-03` | **Meter spoof**: reports 5 kW while drawing ~120 kW | `R7_ELECTRICAL` on the first spoofed frame (*reported 5.0 kW but 718 V × 167 A = 120.0 kW*), quarantined |
-| `-a 2` | **Fleet oscillation**: 1 Hz start/stop on every bay | `R3_OSCILLATION` |
+| `-a 2` | **Fleet oscillation**: every bay stops and starts together once a second, so the transformer swings between 82 % load and none | `R3_OSCILLATION` at ~1.5 s, one fleet-wide alert |
 | `-a 3 -s CP-01` | **Session shadow**: duplicate handshake for a live station | `R4_SESSION_UNIQUE`, socket closed 4001 |
-| `-a 4 -s CP-02` | **Subtle drift**: −2 %/tick under-report, power and current scaled together | Tier-2 ML 0.67 at +17 s (no rule fires), then `R6_METER_FRAUD` quarantine at +42 s |
+| `-a 4 -s CP-02` | **Subtle drift**: −2 %/tick under-report, power and current scaled together | Tier-2 ML 0.75 at +9.7 s (no rule fires), then `R6_METER_FRAUD` quarantine at +43.9 s |
 | `-a 5 -s CP-06 -t TAG-CP-07` | **Card clone, same site**: a card already charging on another bay | `R8_TAG_CLONE`: Authorize answered `Blocked` by the proxy, never reaches the CSMS |
 | `-a 5 -s CHN-02 -t TAG-CP-05 --control-url ws://localhost:9101/control` | **Card clone, across sites**: a Vellore card presented in Chennai | `R8_TAG_CLONE` in Chennai; Vellore raises `R9_THREAT_INTEL` on the bay using the card |
 | `-a 3 -s CP-03 --proxy-url ws://localhost:8001/ocpp` | **A charge point Vellore quarantined (within 15 min) tries to connect in Chennai** | `R9_THREAT_INTEL`, handshake refused 4003 |
 | `-a r` | Reset a site | — |
 
-Honest bays stayed at or below an ML score of 0.12 throughout.
+Honest bays raise nothing: in a 25-minute run that took all eight cars through the 80 % hand-off
+into the CV taper, no alarm fired and the highest ML score was 0.44.
 
 ---
 
@@ -166,11 +167,15 @@ on the ack.
 **Tier 2 — behavioural ML** ([`proxy/ml_engine.py`](proxy/ml_engine.py)): a 5-dimensional
 session feature vector `[power_kw, soc, dp_dt, duration_sec, energy_residual_kwh]` scored
 by `IsolationForest(n_estimators=100, contamination=0.02, random_state=42)`. The model is
-loaded from `proxy/models/tier2.pkl`, trained offline by `python -m proxy.train_tier2` on
-recorded honest sessions plus a 1000-vector synthetic CC-CV baseline (provenance and
-benchmark in [`proxy/tier2_report.md`](proxy/tier2_report.md)). Scores are normalised as
-pinned in CONTEXT.md §5.B; the alert line is `ml_score > 0.65`. The first two samples of
-a session are not scored.
+loaded from `proxy/models/tier2.pkl`, trained by `python -m proxy.train_tier2 --source twin`
+on the fleet's own honest charging curve ([`shared/charging.py`](shared/charging.py)): full
+sessions from constant power through the 78-80 % hand-off and the slow taper to 100 %, up to
+2.5 hours. Its score scale is calibrated on 30 held-out full honest sessions so the most
+unusual honest reading scores 0.5; on 28 more, none crossed 0.65, while drift is caught in a
+median 7-8 s when it starts below 80 % SoC (benchmark and limits in
+[`proxy/tier2_report.md`](proxy/tier2_report.md); `--data <file>` trains on a real dataset
+instead). The alert line is `ml_score > 0.65`. The first two samples of a session are not
+scored.
 
 **Cost.** Tier-1 on a full MeterValues frame (11 sampled values, ~1 KB, JSON parse
 included) measured **16.3 µs mean, 16.0 µs median, 19.0 µs p99** over 200,000 frames.
@@ -235,6 +240,9 @@ tab shows each site's mode.
 
 - The fleet, the cars and the CSMS are simulated; no real charger hardware has been on
   the wire.
+- A meter drift that starts above 80 % SoC, where the car takes at most 58 kW and less every
+  minute, stays inside the honest taper: neither Tier-2 nor R6 catches it. A spoof there is
+  still caught by R7 (power against volts × amps).
 - Transformer kVA is computed from each charger's reported supply-side power with the
   charger's specified power factor (0.99); it is not a revenue meter on the transformer.
 - Card checks act on `Authorize`. A charger that starts on a locally cached card without
@@ -258,6 +266,11 @@ tab shows each site's mode.
   heartbeat age, each site's transformer, load, voltage and frequency, the shared
   indicators with their expiry, the network-wide threat feed, and the hub's
   authentication counters.
+- **Defences** — where the firewall sits (chargers → site network firewall → VoltSentry →
+  CSMS) with live counts of messages inspected, forwarded and held back, then one card per
+  safeguard with its live state: connections refused (duplicate, blocklisted, oversized,
+  malformed), quarantines, cloned cards blocked, TLS, signed and replay-proof site links, the
+  shared blocklist, the mode and the forensic log. Safeguards not built yet are shown as planned.
 - **3D digital twin**, **network topology** with red-team injection, a procedural 3D
   **landing hero**, a **login** gate, and a **`/globe`** of real charging hubs from
   [OpenChargeMap](https://openchargemap.org) (optional key: copy
@@ -271,7 +284,7 @@ tab shows each site's mode.
 pytest -q
 ```
 
-153 tests: OCPP parsing and unit normalisation, the electrical model, the battery pack,
+184 tests: OCPP parsing and unit normalisation, the electrical model, the battery pack,
 every Tier-1 rule, the ML engine, the twin's meter output read back through the proxy's
 parser, the detection pipeline end to end, the federation protocol (signatures, replay,
 key derivation, TTLs, clone correlation), and a hub with two nodes over real sockets.

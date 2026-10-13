@@ -173,7 +173,8 @@ with a fake clock.
   would have stayed silent in front of the judges. Fixed by adding a session-cumulative feature the
   proxy can compute from the wire alone:
   `energy_residual_kwh = reported_Energy.Active.Import.Register_kWh − ∫ reported_power_kw dt`
-  Honest sessions hold this near zero (baseline: `N(0, 0.05)`). Any drift between the reported
+  Honest sessions hold this near zero (baseline: `N(0, 0.05)`; v3 fleet model: `N(0, 0.015)`, see
+  below). Any drift between the reported
   instantaneous power and the accumulating energy register makes it climb monotonically, and the
   forest fires. This is the single highest-risk fix in v2.
 * **`dp_dt` cold start `[FIX-10]`** — undefined on the first `MeterValues` of a session. Contract:
@@ -190,8 +191,20 @@ with a fake clock.
   ```
   Deterministic given `random_state=42`. **Alert threshold: `ml_score > 0.65`.**
 
+* **v3 — fleet baseline and calibrated anchor.** The shipped model (`python -m proxy.train_tier2
+  --source twin`) is fitted on `ml_engine.fleet_baseline()`: 6000 honest vectors on the fleet's own
+  curve (`shared/charging.py`: CC to 78 %, hand-off to 58 kW by 80 %, CV taper), with extra weight on
+  the hand-off and the top 92-100 %, session age 0-9000 s and residual `N(0, 0.015)` kWh (the twin's
+  register is sent to 10 Wh). The score formula above is unchanged; only the low anchor moves:
+  `d_min` is set so the most unusual sample in 30 held-out full honest sessions scores **0.5**
+  (`ml_engine.calibrate`). With the 0.5th-percentile anchor the rarest few percent of honest
+  training samples scored above 0.65 by construction, and a charger reporting once a second always
+  reaches them in a long session: every honest bay false-alarmed once its car passed 80 %.
+  Benchmark and limits: `proxy/tier2_report.md`.
+
 ### C. Cyber-physical twin (`/simulator`)
-* **CC-CV battery engine** — discrete-time loop, 1 Hz tick: constant-current to 80% SoC, then
+* **CC-CV battery engine** — discrete-time loop, 1 Hz tick (v3: the register counts the real time
+  between ticks, ~1.03 s, as a real meter does): constant-current to 80% SoC, then
   exponential taper to 100%. Tracks pack voltage, current, SoC, cumulative kWh (v3: 192-cell 800 V-class pack; V and I
   derived from the power curve so P = V × I, see §10.1).
 * **Fleet** — 8 stations `CP-01`..`CP-08` by default, staggered session starts.
@@ -210,9 +223,9 @@ Single-keypress exploits over the twin control channel:
 | Key | Attack | Effect | Expected detection |
 | :--- | :--- | :--- | :--- |
 | `1` | `meter_spoof` | station reports 5 kW while drawing 120 kW | R7 (first frame) + R6 + ML |
-| `2` | `fleet_oscillate` | 1 Hz Start/Stop across all stations | R3 |
+| `2` | `fleet_oscillate` | every station stops and starts together, once a second (v3: phased on the wall clock, full power while on) | R3 |
 | `3` | `session_shadow` | duplicate handshake on a live `cpid` | R4 |
-| `4` | `subtle_drift` | −2% compounding power under-report per tick | ML only (score climbs past 0.65 in ~40 s) |
+| `4` | `subtle_drift` | −2% compounding power under-report per tick | ML first (score past 0.65 in ~10 s), then R6 (~44 s) |
 | `5` | `tag_clone` (v3) | a bay presents a card already charging elsewhere | R8 at that site, R9 at the card's site |
 | `r` | `reset` | clear quarantine, all stations back to clean | — |
 
@@ -410,9 +423,9 @@ down, every charger connection fails at accept.
 | 0:00 | dashboard on screen, fleet charging | 8 green stations, CC-CV curves rising, transformer at ~62% |
 | 0:30 | one line on why OCPP is exposed | — |
 | 1:00 | press `1` — meter_spoof | CP-03 goes red, `R7_ELECTRICAL` (5 kW reported vs V × I ≈ 120 kW), frame dropped, station quarantined, audio alert |
-| 1:40 | press `r`, then `2` — oscillate | transformer gauge swings, `R3_OSCILLATION` fires fleet-wide |
+| 1:40 | press `r`, then `2` — oscillate | transformer load swings between ~82 % and 0 % every second, `R3_OSCILLATION` fires fleet-wide |
 | 2:20 | press `r`, then `3` — session_shadow | shadow socket rejected at handshake, `R4_SESSION_UNIQUE` |
-| 3:00 | press `r`, then `4` — subtle_drift | **no rule fires at first**; ML score passes 0.65 ~17 s in (measured), yellow badge; R6 quarantines ~25 s later |
+| 3:00 | press `r`, then `4` — subtle_drift | **no rule fires at first**; ML score passes 0.65 ~10 s in (measured), yellow badge; R6 quarantines ~35 s later |
 | 3:40 | export forensic log | JSON downloads |
 
 The `subtle_drift` beat is the pitch. It is the one attack a rule engine cannot catch, and it is why
@@ -453,3 +466,12 @@ Tier-2 exists. Rehearse it twice before judging.
   `recommended_action` carries what enforce would have done. No frame is dropped or answered,
   no charger quarantined or refused (except R4's duplicate-connection refusal), and the node
   publishes no IoCs. `GridEvent.enforcement` and the heartbeat carry the mode.
+
+### 10.4 Defence counters (`GridEvent.defences`, optional)
+
+* What the node has done since it started: frames inspected / forwarded / held back from the CSMS,
+  quarantines, cards answered `Blocked`, and handshakes refused (duplicate session R4 4001,
+  blocklist R9 4003, oversize frame 1009, no `/ocpp/{cpid}` 1008); threats recorded.
+* How it is set up: ingress TLS, bind address, frame limit (64 KB), federation state, dev key.
+* The dashboard's **Defences** tab draws them: chargers -> site network firewall -> VoltSentry
+  (the application firewall) -> CSMS, and one card per safeguard.

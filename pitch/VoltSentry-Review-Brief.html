@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VoltSentry — Project Review Brief</title>
+<style>
+  @page { size: A4; margin: 13mm 14mm 14mm 14mm; }
+  :root {
+    --ink: #0f172a; --body: #1e293b; --muted: #475569; --dim: #64748b;
+    --line: #e2e8f0; --soft: #f8fafc; --accent: #0f766e; --accent-2: #0e7490;
+    --warn: #b45309; --bad: #b91c1c;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #fff; color: var(--body); font-family: var(--sans);
+    font-size: 9.5pt; line-height: 1.38; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  h1 { font-size: 21pt; margin: 0; color: var(--ink); letter-spacing: -0.01em; }
+  h2 { break-after: avoid; font-size: 12.5pt; color: var(--ink); margin: 11px 0 5px; padding-bottom: 3px; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 10.4pt; color: var(--accent); margin: 12px 0 4px; }
+  p { margin: 0 0 6px; }
+  ul { margin: 0 0 6px; padding-left: 17px; }
+  li { margin: 0 0 3px; }
+  code { font-family: var(--mono); font-size: 8.4pt; background: #f1f5f9; padding: 0 3px; border-radius: 3px; color: var(--ink); }
+  b { color: var(--ink); }
+  .page-break { break-before: page; }
+  .keep { break-inside: avoid; }
+
+  .masthead { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
+    padding-bottom: 8px; border-bottom: 3px solid var(--ink); }
+  .masthead .sub { color: var(--muted); font-size: 10.5pt; margin-top: 3px; }
+  .masthead .meta { flex: none; white-space: nowrap; text-align: right; font-size: 8.4pt; color: var(--muted); line-height: 1.5; }
+  .tag { font-family: var(--mono); font-size: 7.6pt; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 8px 0 2px; }
+  .stat { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--soft); }
+  .stat .v { font-size: 13.5pt; font-weight: 700; color: var(--ink); line-height: 1.1; }
+  .stat .k { font-size: 7.6pt; color: var(--muted); margin-top: 2px; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .box { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--soft); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin: 2px 0 6px; }
+  th { text-align: left; font-size: 7.6pt; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+    border-bottom: 1.5px solid var(--ink); padding: 3px 5px; }
+  td { border-bottom: 1px solid var(--line); padding: 3px 5px; vertical-align: top; }
+  td.r { font-family: var(--mono); font-size: 7.8pt; color: var(--accent-2); white-space: nowrap; }
+  .q { color: var(--bad); font-weight: 600; }
+  .l { color: var(--muted); }
+
+  figure { margin: 4px 0 0; }
+  figcaption { font-size: 7.8pt; color: var(--dim); text-align: center; margin-top: 2px; }
+
+  .qa-group { break-after: avoid; font-size: 8pt; font-family: var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); margin: 13px 0 5px; }
+  .qa { break-inside: avoid; margin: 0 0 7px; padding: 0 0 6px; border-bottom: 1px dashed var(--line); }
+  .qa .qq { font-weight: 700; color: var(--ink); margin-bottom: 2px; }
+  .qa .qq span { color: var(--accent); margin-right: 4px; }
+  .qa .aa { color: var(--body); }
+  .honest { color: var(--warn); font-weight: 600; }
+  .foot { margin-top: 12px; font-size: 7.8pt; color: var(--dim); border-top: 1px solid var(--line); padding-top: 5px; }
+</style>
+</head>
+<body>
+
+<div class="masthead">
+  <div>
+    <div class="tag">Project review brief</div>
+    <h1>VoltSentry</h1>
+    <div class="sub">Inline security proxy for EV charging networks · OCPP 1.6-J</div>
+  </div>
+  <div class="meta">
+    Deepanshu Agarwal · Shubham Krishna · Krish Jairath<br>
+    Started at Code2Create, ACM-VIT Vellore<br>
+    github.com/deepanshu214/Voltsentry
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="v">9 + ML</div><div class="k">deterministic rules plus a behavioural model</div></div>
+  <div class="stat"><div class="v">~16 µs</div><div class="k">Tier-1 check per meter frame (mean, 200k frames)</div></div>
+  <div class="stat"><div class="v">5 / 5</div><div class="k">demo attacks detected on the live network</div></div>
+  <div class="stat"><div class="v">184</div><div class="k">automated tests passing</div></div>
+  <div class="stat"><div class="v">2 sites</div><div class="k">14 chargers, one federation hub in the demo</div></div>
+</div>
+
+<h2>1 · The problem</h2>
+<ul>
+  <li>Public EV chargers talk to the operator's central management system (<b>CSMS</b>) using <b>OCPP</b>: JSON messages over a WebSocket. Chargers are exposed roadside hardware, often on weakly authenticated connections.</li>
+  <li>A compromised charger can <b>lie</b>: bill near zero while drawing full power, start and stop in step with others to swing a transformer's load, take over another charger's session, or let a <b>cloned RFID card</b> charge two cars at once.</li>
+  <li>Cloud platforms analyse this data minutes to hours later, and security hardware cannot be retrofitted into millions of installed chargers.</li>
+</ul>
+
+<h2>2 · What VoltSentry does</h2>
+<div class="two">
+  <ul>
+    <li><b>A transparent proxy</b> between the chargers and the CSMS. Clean traffic passes through untouched; no charger firmware or backend change.</li>
+    <li><b>Two detection tiers</b> check every frame before it is forwarded: 9 deterministic rules (Tier 1) and an Isolation Forest model (Tier 2).</li>
+    <li><b>Active quarantine</b>: the forged frame is dropped, the charger is told to go <code>Inoperative</code> (<code>ChangeAvailability</code>) and its socket is closed.</li>
+  </ul>
+  <ul>
+    <li><b>A network of sites</b>: each site runs its own VoltSentry node; nodes share threats through a signed federation hub, so the network sees what no single site can (one card charging in two cities).</li>
+    <li><b>Real units</b>: kW, kWh, V, A, Hz and kVA, read off the wire and shown on a live NOC dashboard.</li>
+    <li><b>Monitor mode</b> for new sites: detect and report everything, block nothing, until the rules are proven on that site's meters.</li>
+  </ul>
+</div>
+
+<figure>
+<svg viewBox="0 0 720 196" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <!-- chargers -->
+  <rect x="8" y="22" width="132" height="62" rx="7" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="74" y="46" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">Chargers</text>
+  <text x="74" y="63" text-anchor="middle" font-size="10" fill="#475569">CP-01 … CP-08</text>
+  <text x="74" y="77" text-anchor="middle" font-size="9" fill="#64748b">120 kW DC each</text>
+  <!-- proxy -->
+  <rect x="236" y="10" width="232" height="86" rx="8" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.6"/>
+  <text x="352" y="31" text-anchor="middle" font-size="12.5" font-weight="700" fill="#0f172a">VoltSentry node (one per site)</text>
+  <text x="352" y="49" text-anchor="middle" font-size="10" fill="#0f766e">Tier 1: rules R1–R9</text>
+  <text x="352" y="64" text-anchor="middle" font-size="10" fill="#0f766e">Tier 2: Isolation Forest (energy residual)</text>
+  <text x="352" y="81" text-anchor="middle" font-size="9.5" fill="#475569">quarantine · forensic log</text>
+  <!-- csms -->
+  <rect x="566" y="22" width="146" height="62" rx="7" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="639" y="46" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">CSMS</text>
+  <text x="639" y="63" text-anchor="middle" font-size="10" fill="#475569">operator's backend</text>
+  <text x="639" y="77" text-anchor="middle" font-size="9" fill="#64748b">unchanged</text>
+  <!-- arrows top -->
+  <line x1="141" y1="53" x2="233" y2="53" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <text x="187" y="45" text-anchor="middle" font-size="9" fill="#475569">OCPP / WebSocket</text>
+  <line x1="469" y1="53" x2="563" y2="53" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <text x="516" y="45" text-anchor="middle" font-size="9" fill="#475569">clean frames only</text>
+  <!-- dashboard -->
+  <rect x="236" y="132" width="132" height="52" rx="7" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="302" y="155" text-anchor="middle" font-size="11.5" font-weight="700" fill="#0f172a">NOC dashboard</text>
+  <text x="302" y="171" text-anchor="middle" font-size="9" fill="#64748b">live feed · Next.js</text>
+  <line x1="302" y1="97" x2="302" y2="129" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+  <!-- hub -->
+  <rect x="420" y="132" width="132" height="52" rx="7" fill="#ecfeff" stroke="#0e7490" stroke-width="1.4"/>
+  <text x="486" y="155" text-anchor="middle" font-size="11.5" font-weight="700" fill="#0f172a">Federation hub</text>
+  <text x="486" y="171" text-anchor="middle" font-size="9" fill="#0e7490">signed threat intel</text>
+  <line x1="420" y1="97" x2="466" y2="129" stroke="#0e7490" stroke-width="1.4" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <!-- other site -->
+  <rect x="604" y="132" width="108" height="52" rx="7" fill="#f8fafc" stroke="#94a3b8" stroke-dasharray="4 3"/>
+  <text x="658" y="155" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">Other sites</text>
+  <text x="658" y="171" text-anchor="middle" font-size="9" fill="#64748b">e.g. VS-CHENNAI</text>
+  <line x1="553" y1="158" x2="601" y2="158" stroke="#0e7490" stroke-width="1.4" marker-end="url(#ar)" marker-start="url(#ar)"/>
+</svg>
+<figcaption>Every charger frame passes through the site's VoltSentry node. Sites dial out to the hub; the hub never carries charger traffic.</figcaption>
+</figure>
+
+<h2>3 · Detection engine</h2>
+<table>
+  <tr><th style="width:21%">Rule</th><th>Trips when</th><th style="width:15%">Action</th></tr>
+  <tr><td class="r">R1_STATE_ORDER</td><td>meter readings or a stop for a session that was never started</td><td>log</td></tr>
+  <tr><td class="r">R2_PHYSICS</td><td>power &gt; 150 kW, or &gt; 60 kW above 80 % charge (the battery must taper), or negative</td><td class="q">quarantine</td></tr>
+  <tr><td class="r">R3_OSCILLATION</td><td>≥ 6 start/stop transitions across the fleet within 10 s</td><td>log (fleet-wide)</td></tr>
+  <tr><td class="r">R4_SESSION_UNIQUE</td><td>a second connection claiming a charger that is already connected</td><td>refuse socket</td></tr>
+  <tr><td class="r">R5_TXN_INTEGRITY</td><td>a meter reading quoting a transaction that is unknown or belongs to another charger</td><td class="q">quarantine</td></tr>
+  <tr><td class="r">R6_METER_FRAUD</td><td>the energy register pulls away from reported power faster than any honest session</td><td class="q">quarantine</td></tr>
+  <tr><td class="r">R7_ELECTRICAL</td><td>reported power ≠ reported voltage × current (beyond 2 kW / 10 %)</td><td class="q">quarantine</td></tr>
+  <tr><td class="r">R8_TAG_CLONE</td><td>an RFID card already in a live session, at this site or another</td><td>block card</td></tr>
+  <tr><td class="r">R9_THREAT_INTEL</td><td>a card or charger that another site reported as compromised</td><td>block / refuse</td></tr>
+</table>
+<p><b>Tier 2 (behavioural ML).</b> Each session is a 5-number vector <code>[power_kw, soc, dp_dt, duration_sec, energy_residual_kwh]</code> scored by an <b>Isolation Forest</b> (100 trees), trained on the fleet's whole charging curve and calibrated on separate honest sessions; alert above <b>0.65</b>. The key feature is the <b>energy residual</b>: the reported energy total minus the integral of reported power over time. Honest sessions keep it near zero; a slow lie makes it climb, even when every single reading is within limits. An offline CUSUM change-detector on the residual corroborates and explains the result.</p>
+
+<h2>4 · The five demo attacks</h2>
+<table>
+  <tr><th style="width:19%">Attack</th><th>What the attacker does</th><th style="width:38%">What catches it (measured on the running system)</th></tr>
+  <tr><td><b>Meter spoof</b></td><td>CP-03 reports 5 kW while drawing ~120 kW</td><td>R7 on the <b>first</b> forged frame: "5.0 kW but 721 V × 166 A = 120 kW"; quarantined</td></tr>
+  <tr><td><b>Fleet oscillation</b></td><td>every charger stops and starts together once a second: the transformer swings between 82 % load and none</td><td>R3 within ~1.5 s, one fleet-wide alert</td></tr>
+  <tr><td><b>Session shadow</b></td><td>a second connection pretends to be live charger CP-01</td><td>R4: refused at the handshake (close code 4001)</td></tr>
+  <tr><td><b>Subtle drift</b></td><td>under-reports by a compounding 2 % per second, current scaled to match</td><td><b>No rule fires.</b> ML crosses 0.65 at ~10 s; R6 quarantines at ~44 s</td></tr>
+  <tr><td><b>Card clone</b></td><td>a Chennai charger presents a card that is charging in Vellore</td><td>R8 in Chennai (card answered Blocked, never reaches the CSMS); R9 alert in Vellore</td></tr>
+</table>
+
+<div class="two">
+  <div>
+    <h2>5 · Real electrical units</h2>
+    <p><code>11 kV feeder → 1250 kVA transformer → 415 V three-phase bus → 120 kW DC chargers → car</code></p>
+    <ul>
+      <li>A house takes <b>one phase, ~230 V</b>. A fast charger needs all three phases: <b>415 V line-to-line = 240 V line-to-neutral</b>.</li>
+      <li><b>1250 is kVA</b> (apparent power), not volts. 8 chargers × 127.7 kVA = 1022 kVA, so the next standard size is 1250 kVA. The 6-charger site gets 1000 kVA.</li>
+      <li>Line current I = S ÷ (√3 × V) ≈ 1403 A per phase at full load.</li>
+      <li>DC side: 800 V-class pack, ~700 V × ~170 A = 120 kW, inside the 200 A limit of an uncooled CCS2 cable.</li>
+      <li>Grid frequency is national; simulated inside the Indian band 49.90–50.05 Hz.</li>
+    </ul>
+  </div>
+  <div>
+    <h2>6 · Multi-site network</h2>
+    <ul>
+      <li>Every message is <b>HMAC-SHA256 signed</b> with that site's own key; replay protection with rising sequence numbers and a ±120 s time window. Optional TLS (tested with TLS 1.3).</li>
+      <li><b>Card numbers never leave a site</b>: only salted hashes are shared.</li>
+      <li>Shared blocklist entries expire: chargers after 15 min, cards after 1 h.</li>
+      <li>If the hub goes down, <b>each site keeps protecting itself</b>; queued intel is delivered when it returns.</li>
+      <li><b>Monitor mode</b> (<code>--mode monitor</code>): reports what enforce mode <i>would</i> do, without blocking or publishing blocklist entries.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="two">
+  <div>
+    <h2>7 · Real vs simulated</h2>
+    <p><b>Real:</b> the OCPP 1.6-J wire format and call correlation, the session state machine, all detection logic (R1–R9, the ML model), unit handling, quarantine, the signed federation, forensic logging and the dashboard.</p>
+    <p><b>Simulated:</b> the chargers and cars (a CC-CV battery model with an 800 V pack), and the CSMS (a small mock). The proxy points at any OCPP 1.6 CSMS without code changes.</p>
+  </div>
+  <div>
+    <h2>8 · Tech stack</h2>
+    <table>
+      <tr><td><b>Proxy, federation, ML</b></td><td>Python 3.11+, asyncio, websockets, scikit-learn, stdlib <code>hmac</code>/<code>ssl</code></td></tr>
+      <tr><td><b>Dashboard</b></td><td>Next.js 14, TypeScript, Tailwind CSS, Three.js</td></tr>
+      <tr><td><b>Protocol</b></td><td>OCPP 1.6-J (JSON over WebSocket)</td></tr>
+      <tr><td><b>Tests</b></td><td>pytest: 184 tests, including a hub with two nodes over real sockets</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="keep">
+<h2>9 · Known limits and next steps</h2>
+<div class="two">
+  <ul>
+    <li>No real charger or CSMS on the wire yet; next: test against SteVe / CitrineOS.</li>
+    <li>ML trained on simulated sessions; next: re-fit and measure false positives on ACN-Data / ElaadNL.</li>
+    <li>Charger authentication (OCPP security profiles) is next; TLS already works.</li>
+  </ul>
+  <ul>
+    <li>One hub, no high availability; blocklists are held in memory.</li>
+    <li>Dashboard feeds are unauthenticated: keep them on localhost.</li>
+    <li>In progress: chargers with several connectors (per-plug sessions).</li>
+  </ul>
+</div>
+</div>
+
+<!-- ============================================================ Q&A -->
+<h2 style="margin-top:22px">Possible review questions</h2>
+<p class="l">Short answers in plain language. Numbers trace to the code, the test suite or measurements on the running two-site network.</p>
+
+<div class="qa-group">Concept</div>
+
+<div class="qa"><div class="qq"><span>Q1</span>What problem does VoltSentry solve, in one sentence?</div>
+<div class="aa">It stops a compromised EV charger from lying to the operator's backend, by checking every OCPP message in real time and cutting the charger off the moment its data is provably false.</div></div>
+
+<div class="qa"><div class="qq"><span>Q2</span>Why a proxy, and not a change to the charger or the CSMS?</div>
+<div class="aa">Millions of chargers are already installed and their firmware can't be trusted or easily changed, and operators won't rewrite their backend. A proxy drops in between them: the charger is pointed at VoltSentry instead of the CSMS, and neither side notices.</div></div>
+
+<div class="qa"><div class="qq"><span>Q3</span>What is OCPP, and why version 1.6-J?</div>
+<div class="aa">The Open Charge Point Protocol is the standard language between chargers and management systems. 1.6-J (JSON over WebSocket) is still the most widely deployed version, so it is what a real fleet speaks today. OCPP 2.0.1 is on the roadmap.</div></div>
+
+<div class="qa"><div class="qq"><span>Q4</span>How is this different from a normal firewall or intrusion detection system?</div>
+<div class="aa">A generic firewall doesn't understand OCPP. VoltSentry checks domain rules: the session order, the physics of a battery (it must taper above 80 %), power = voltage × current, and energy conservation over a whole session. It also acts in the protocol itself, by telling the charger to go out of service.</div></div>
+
+<div class="qa"><div class="qq"><span>Q5</span>What is new about this work?</div>
+<div class="aa">Inline, OCPP-aware detection with active quarantine; the energy-residual feature that makes slow billing fraud visible from the wire alone; and sites that share threats so the network catches what no single site can, such as one card charging in two cities.</div></div>
+
+<div class="qa-group">Electrical units (faculty feedback)</div>
+
+<div class="qa"><div class="qq"><span>Q6</span>Homes get 220–230 V. Why does the dashboard show 415–420 V, and what was the "500"?</div>
+<div class="aa">A house uses one phase: about 230 V between phase and neutral. A 120 kW charger needs all three phases: 415 V between lines, which is 240 V line-to-neutral, the same order as a home. The old "500" was the transformer rating in <b>kVA</b>, not volts, and it was wrong: eight 120 kW chargers draw 1022 kVA, so the site needs a 1250 kVA transformer. The dashboard now shows measured volts both ways, amps, Hz and kVA.</div></div>
+
+<div class="qa"><div class="qq"><span>Q7</span>Why is the car side about 700 V?</div>
+<div class="aa">The charger converts AC to DC for the battery. The simulated cars have an 800 V-class pack, so 120 kW flows at about 700 V × 170 A, inside the 200 A limit of an uncooled CCS2 cable. A 400 V pack would need 300 A.</div></div>
+
+<div class="qa"><div class="qq"><span>Q8</span>Why kVA and not kW for the transformer?</div>
+<div class="aa">A transformer heats with current, whatever the phase angle, so it is rated in apparent power. kVA = kW ÷ power factor (0.99 for these chargers). Each charger draws 120 kW ÷ 0.95 efficiency + 0.15 kW standby = 126.5 kW = 127.7 kVA.</div></div>
+
+<div class="qa"><div class="qq"><span>Q9</span>Why does the frequency change if one site cannot move the grid?</div>
+<div class="aa">Exactly because frequency belongs to the whole national grid. The chargers report what they measure at their inlet; in the simulator it wanders inside India's operating band (49.90–50.05 Hz), independent of the site's own load.</div></div>
+
+<div class="qa-group">Detection</div>
+
+<div class="qa"><div class="qq"><span>Q10</span>Why two tiers? Why not only rules, or only ML?</div>
+<div class="aa">Rules are instant, explainable and have no false positives on true invariants, so they catch the loud attacks on the first frame. But a slow, self-consistent lie never breaks a rule. The ML tier exists for that one case. Rules decide quarantines; ML raises an early warning.</div></div>
+
+<div class="qa"><div class="qq"><span>Q11</span>How does R7 catch the meter spoof on the first frame?</div>
+<div class="aa">One meter message carries power, voltage and current together. Power must equal volts × amps. A charger that edits only the power figure contradicts itself: "5 kW, but 721 V × 166 A = 120 kW".</div></div>
+
+<div class="qa"><div class="qq"><span>Q12</span>What if the attacker also fakes the current, so V × I matches?</div>
+<div class="aa">That is the subtle drift attack. Every instantaneous reading then agrees, so R7 is silent, but the energy register no longer matches the integral of the reported power. That energy residual climbs; the ML model flags it at ~10 s and R6 quarantines at ~44 s. <span class="honest">Honest limits:</span> a drift that starts above 80 % charge, where the car already takes 58 kW or less, stays inside the honest taper and is not caught by the model or R6. And if a charger falsified every reading <i>and</i> the energy register consistently, nothing on the wire would contradict it; that needs an independent measurement, such as comparing the sum of all chargers with the site's own meter, which is future work.</div></div>
+
+<div class="qa"><div class="qq"><span>Q13</span>Why an Isolation Forest, and not a deep model such as an LSTM?</div>
+<div class="aa">The input is a five-number vector built around one engineered feature, and the check runs inside the forwarding path. An Isolation Forest is small, fast, needs no attack labels (none exist publicly for OCPP), and its behaviour can be tested. A deep model would add latency for no gain at this input size.</div></div>
+
+<div class="qa"><div class="qq"><span>Q14</span>What data is the model trained on, and why is the threshold 0.65?</div>
+<div class="aa">On the simulated fleet's whole charging curve: full power to 78 %, the step down to 58 kW by 80 %, and the slow taper to 100 %, in sessions up to 2.5 hours. The scale is then calibrated on 30 separate full honest sessions so the most unusual honest reading scores 0.5, which leaves a margin under 0.65. On 28 more full sessions nothing crossed 0.65, while drift crosses it in about 7–10 s. (The first model saw only full-power charging and flagged every honest car above 80 %; we found that in long test runs and fixed it.) <span class="honest">Honest limit:</span> it must be re-trained and re-calibrated on real fleet data before production.</div></div>
+
+<div class="qa"><div class="qq"><span>Q15</span>What is your false-positive rate?</div>
+<div class="aa"><span class="honest">Not measured on real data yet.</span> On the simulated fleet, none of 28 full honest sessions (up to 2 hours each) crossed 0.65, and a 25-minute live run, with every car passing through the 80 % hand-off, raised zero alarms. Tier-1 rules check physical and protocol invariants, so an honest charger should never trip them. The real number needs a real dataset (ACN-Data or ElaadNL), which is the next step; monitor mode exists so a site can measure it on its own meters before blocking anything.</div></div>
+
+<div class="qa"><div class="qq"><span>Q16</span>What exactly happens when a charger is quarantined?</div>
+<div class="aa">The forged frame is dropped so the CSMS never sees it, the proxy sends <code>ChangeAvailability(Inoperative)</code> to the charger, the dashboard shows it red at 0 kW, the incident is written to the forensic log, the socket is closed, and other sites are told to refuse that charger for 15 minutes.</div></div>
+
+<div class="qa"><div class="qq"><span>Q17</span>Why does oscillation (R3) only log, and not quarantine?</div>
+<div class="aa">R3 is a fleet-wide pattern. Quarantining on it would switch off every charger on the site, which is the very outage the attacker wants. It raises one fleet-wide alert for an operator to act on.</div></div>
+
+<div class="qa-group">Network and security</div>
+
+<div class="qa"><div class="qq"><span>Q18</span>How do several VoltSentry servers work together?</div>
+<div class="aa">Each site runs its own node next to its chargers, and every node dials out to a federation hub. The hub relays threats and blocklists and keeps a table of which cards are charging where (as hashes). A charger quarantined in Vellore is refused in Chennai, and a card live in two places at once is blocked. The hub never carries charger traffic.</div></div>
+
+<div class="qa"><div class="qq"><span>Q19</span>What if the hub or the internet link goes down?</div>
+<div class="aa">Detection never waits on the hub. Each site keeps checking and quarantining on its own, using a local copy of the shared intel. Messages are queued and delivered when the hub returns. We tested this: with the hub stopped, a site still quarantined a meter spoof.</div></div>
+
+<div class="qa"><div class="qq"><span>Q20</span>How are the links between sites secured? Could someone fake a site?</div>
+<div class="aa">Every message is signed with HMAC-SHA256 using that site's own key, so one leaked key cannot speak for another site. Rising sequence numbers and a ±120 s time window stop replays. TLS encrypts the link. Wrong keys, impersonation and replayed messages were all refused in testing.</div></div>
+
+<div class="qa"><div class="qq"><span>Q21</span>Do sites share customers' card numbers?</div>
+<div class="aa">No. Sites share only a salted hash of each card, using a salt the hub issues after authentication. That is enough to see the same card at two sites without revealing the number.</div></div>
+
+<div class="qa"><div class="qq"><span>Q22</span>In the demo, why did CP-05's card change to TAG-CP-05-R1?</div>
+<div class="aa">Once a card has been copied, the copy is as good as the original, so the card number is blocked across the network for an hour. The real customer is issued a replacement card, just as a bank does with a cloned card. Every retry by the attacker is still refused, but it is logged once a minute so the log stays readable.</div></div>
+
+<div class="qa"><div class="qq"><span>Q23</span>Isn't TLS enough? Why do you need detection at all?</div>
+<div class="aa">TLS proves who you are talking to; it does not prove the charger is telling the truth. A charger with valid credentials can still be compromised and send false meter data. Detection covers that. Charger authentication through the OCPP security profiles is the next addition.</div></div>
+
+<div class="qa"><div class="qq"><span>Q24</span>Could an attacker bypass the proxy, or is the proxy a single point of failure?</div>
+<div class="aa">In deployment, chargers are configured with the proxy's address and the CSMS accepts connections only from the proxy, so there is no path around it. Today there is one proxy per site; if it stops, that site's chargers lose their link until it restarts. Running several instances per site, with chargers split between them by charger ID, is the planned fix.</div></div>
+
+<div class="qa"><div class="qq"><span>Q25</span>How would an operator roll this out to a new site safely?</div>
+<div class="aa">Start in monitor mode: every rule and the model run and every threat is reported with what enforce mode <i>would</i> have done, but nothing is blocked and nothing is pushed to other sites. Once the false alarms on that site's own meters are known, switch to enforce mode.</div></div>
+
+<div class="qa-group">Implementation, testing and scale</div>
+
+<div class="qa"><div class="qq"><span>Q26</span>How did you verify that it works?</div>
+<div class="aa">184 automated tests cover OCPP parsing and units, the electrical model, the battery, every rule, the ML engine, the full pipeline, and the federation (including a hub with two nodes over real sockets). On the running two-site network we ran normal charging (zero alarms) and all five attacks (all detected).</div></div>
+
+<div class="qa"><div class="qq"><span>Q27</span>What is real and what is simulated?</div>
+<div class="aa">Real: the protocol handling, all detection logic, quarantine, units, the signed federation and the dashboard. Simulated: the chargers' physics and the CSMS. There is no public labelled set of OCPP attacks, so the attacks are generated by a red-team tool; the CSMS is replaceable by a real one such as SteVe or CitrineOS.</div></div>
+
+<div class="qa"><div class="qq"><span>Q28</span>Is it fast enough to sit inline? Does it scale?</div>
+<div class="aa">Tier-1 takes about 16 µs per full meter message (mean over 200,000 frames, p99 19 µs). A 10,000-charger operator sending one reading every 10 s produces about 1,000 messages per second, which one instance handles with large headroom. Each site runs its own node, so load is spread by design.</div></div>
+
+<div class="qa"><div class="qq"><span>Q29</span>Who would use this?</div>
+<div class="aa">Charge-point operators and CSMS vendors. It deploys in front of an existing backend, with no charger or backend change: security added without touching the fleet.</div></div>
+
+<div class="qa"><div class="qq"><span>Q30</span>What are the main limitations, and what comes next?</div>
+<div class="aa">Not yet tested on real chargers or a real CSMS; the ML model needs real data and a measured false-positive rate; charger authentication (OCPP security profiles) is next; the hub has no high availability; dashboard feeds need authentication. Further out: OCPP 2.0.1 and ISO 15118 Plug &amp; Charge.</div></div>
+
+<div class="qa-group">Asked at the last review</div>
+
+<div class="qa"><div class="qq"><span>Q31</span>What firewall are you using?</div>
+<div class="aa"><b>Show the Defences tab.</b> VoltSentry is the firewall: an application-level firewall that understands OCPP, built by us, no third-party product. A normal network firewall decides only by IP address and port, so it would let a charger's "5 kW" lie straight through; VoltSentry reads every message and holds back the forged ones before they reach the CSMS. A real site uses both: its own network firewall lets only chargers reach VoltSentry and only VoltSentry reach the CSMS. The tab's diagram shows exactly that, with live counts of messages inspected, forwarded and held back. The laptop demo has no network firewall configured.</div></div>
+
+<div class="qa"><div class="qq"><span>Q32</span>Apart from quarantine, what other safeguards do you use?</div>
+<div class="aa"><b>Show the Defences tab, scroll down</b> — one card per safeguard with its live count. At the connection: duplicate connections refused (R4), blocklisted chargers refused (R9), oversized messages refused (over 64 KB), malformed connections refused, TLS (available, off in the lab). On every message: forged messages held back, cloned cards answered Blocked. Between sites: messages signed with HMAC-SHA256 per-site keys, replay protection, card numbers shared only as hashes, a blocklist that expires. Operations: monitor mode for new sites, the forensic log, and each site keeps working if the hub is down. <span class="honest">Not built yet</span> (shown as planned on the tab): charger passwords and certificates, and real console login.</div></div>
+
+<div class="foot">VoltSentry · project review brief · figures from the repository (README, test suite) and measurements on the running two-site network.</div>
+
+</body>
+</html>

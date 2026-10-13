@@ -19,6 +19,8 @@ from typing import Optional, Sequence
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
+from shared.charging import CC_END_SOC, CV_KNEE_SOC, cc_cv_power_kw, honest_dp_dt
+
 FEATURE_ORDER = ["power_kw", "soc", "dp_dt", "duration_sec", "energy_residual_kwh"]
 
 # Pinned model hyperparameters (CONTEXT.md §5.B / AGENTS.md). The seed is
@@ -34,6 +36,27 @@ CV_TAPER_SOC = 80.0
 
 # Alert threshold on the normalised score (CONTEXT.md §5.B).
 ML_ALERT_THRESHOLD = 0.65
+
+# Fleet baseline (fleet_baseline): honest charging on the twin's own curve.
+FLEET_BASELINE_N = 6000
+FLEET_POWER_STD_KW = 2.0
+FLEET_DPDT_STD = 0.5               # kW/s
+# Honest residual on the twin's meters: the register is sent to 10 Wh and a
+# reading can arrive a few hundred ms late, so |residual| stays under ~0.01
+# kWh (measured live: max 0.008). 0.015 leaves room above that.
+FLEET_RESIDUAL_STD_KWH = 0.015
+# A full session from 5 % to 100 % takes just over two hours on this curve.
+FLEET_DURATION_MAX_SEC = 9000.0
+# The curve's two short transitions, sampled more densely so an honest charger
+# passing through them is not a rarity: the CC->CV hand-off and the last few
+# percent, where power is a few kW and the session is old.
+FLEET_HANDOFF_SOC = (CC_END_SOC - 0.5, CV_KNEE_SOC + 0.5)
+FLEET_TOP_SOC = (92.0, 100.0)
+FLEET_FOCUS_SHARE = 0.15           # of the baseline, for each of the two bands
+
+# Calibrated scale (calibrate): the most unusual honest sample in a held-out
+# set of full sessions scores this, leaving a margin under the 0.65 alert.
+HONEST_WORST_SCORE = 0.5
 
 
 @dataclass
@@ -215,6 +238,50 @@ def fit_tier2(X: np.ndarray, seed: int = RANDOM_STATE) -> Tier2Model:
     ).fit(X)
     d = clf.decision_function(X)
     return Tier2Model(clf, float(d.max()), float(np.percentile(d, 0.5)))
+
+
+def fleet_baseline(n: int = FLEET_BASELINE_N, seed: int = RANDOM_STATE) -> np.ndarray:
+    """Honest feature vectors on the fleet's own charging curve (shared/charging.py).
+
+    The generic `generate_baseline` assumes a taper from 120 kW at 80 % and
+    sessions under an hour. The twin steps down to 58 kW by 80 % and a car
+    charged to 100 % stays on the plug for up to ~two hours, so on that baseline
+    every honest charger looked anomalous once its car passed 80 %.
+
+    SoC is drawn uniformly plus extra weight on the hand-off and the top few
+    percent; power and dp_dt follow the curve with noise; duration is uniform
+    over a full session; the residual is the honest meter noise.
+    Deterministic given `seed`. Returns an (n, 5) array in FEATURE_ORDER.
+    """
+    rng = np.random.default_rng(seed)
+    n_focus = int(n * FLEET_FOCUS_SHARE)
+    soc = np.concatenate([
+        rng.uniform(0.0, 100.0, n - 2 * n_focus),
+        rng.uniform(*FLEET_HANDOFF_SOC, n_focus),
+        rng.uniform(*FLEET_TOP_SOC, n_focus),
+    ])
+    power = np.array([cc_cv_power_kw(s) for s in soc]) + rng.normal(0.0, FLEET_POWER_STD_KW, n)
+    power = np.clip(power, 0.0, None)
+    dp_dt = np.array([honest_dp_dt(s) for s in soc]) + rng.normal(0.0, FLEET_DPDT_STD, n)
+    duration = rng.uniform(0.0, FLEET_DURATION_MAX_SEC, n)
+    residual = rng.normal(0.0, FLEET_RESIDUAL_STD_KWH, n)
+    return np.column_stack([power, soc, dp_dt, duration, residual])
+
+
+def calibrate(model: Tier2Model, honest_vectors, worst_score: float = HONEST_WORST_SCORE) -> Tier2Model:
+    """Re-anchor the score scale on honest sessions the forest was not fitted on.
+
+    The fit-time anchor (0.5th percentile of the training scores) puts the
+    rarest few percent of honest training samples above 0.65 by construction.
+    A charger reports once a second, so over a long session it always reaches
+    those rare stretches and raises false alarms. Here d_max stays as fitted
+    and d_min is set so the most unusual honest sample in `honest_vectors`
+    scores `worst_score`. The score formula itself is unchanged.
+    """
+    X = np.asarray(honest_vectors, dtype=float)
+    worst_d = float(model.clf.decision_function(X).min())
+    span = (model._d_max - worst_d) / worst_score
+    return Tier2Model(model.clf, model._d_max, model._d_max - span)
 
 
 def cusum_residual(

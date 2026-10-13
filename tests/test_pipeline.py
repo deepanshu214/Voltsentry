@@ -122,10 +122,10 @@ async def test_rejected_start_does_not_mark_the_card_live():
 
 def test_grid_snapshot_converts_to_real_units():
     state = ProxyState()
-    st = state.station("CP-01")
-    st.status = StationStatus.CHARGING
-    st.last_power_reported_kw = 120.0
-    st.record_electrical(ac_power_kw=126.4, ac_voltage_v=420.7, frequency_hz=50.01, ts=1000.0)
+    plug = state.station("CP-01").connector(1)
+    plug.status = StationStatus.CHARGING
+    plug.last_power_reported_kw = 120.0
+    plug.record_electrical(ac_power_kw=126.4, ac_voltage_v=420.7, frequency_hz=50.01, ts=1000.0)
     snap = state.grid(now=1001.0)
     assert (snap.output_kw, snap.input_kw, snap.active_stations) == (120.0, 126.4, 1)
     assert snap.lt_voltage_v == 420.7 and snap.frequency_hz == 50.01

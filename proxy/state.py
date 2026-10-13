@@ -1,13 +1,19 @@
-"""Per-station session state and cross-station registries — pure logic, no I/O.
+"""Per-charger, per-connector session state and cross-station registries — pure logic, no I/O.
 
 This is the memory the rule engine reads. The relay (main.py) applies observed
 frames to this state and asks rules.py to judge them.
 
+A charge point (cpid) has one or more connectors (plugs), and each connector
+runs its own charging session: its own transaction, card, meter register and
+ML features. Connector 0 is OCPP's "the charger as a whole" (its main meter);
+it never carries a transaction.
+
 What lives here (BRIEF.md):
-  * per-station FSM  — enough to answer "is there a live Authorize->StartTransaction?"
-  * transaction registry — transactionId -> owning cpid (R5)
+  * per-connector session — "is there a live transaction on this plug?" (R1)
+  * transaction registry — transactionId -> (cpid, connector) (R5)
+  * card registry — idTag -> (cpid, connector) with a live session (R8)
   * connection registry — which cpids have a live socket (R4)
-  * quarantine set — cpids the proxy has severed
+  * quarantine set — cpids the proxy has severed; a quarantine takes the whole charger
   * pending-call map — uniqueId -> action, so a CALLRESULT can be correlated back
     to the CALL that produced it (a CALLRESULT does not carry the action name)
 """
@@ -16,27 +22,32 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from shared.electrical import ac_input_kw
 from shared.schemas import StationStatus
 from proxy.ml_engine import SessionFeatures, compute_session_features
 
+MAIN_METER = 0
+
+
+def connector_label(cpid: str, connector_id: int) -> str:
+    """How a plug is named in logs, threats and the federation: CP-01, CP-01/2."""
+    return cpid if connector_id == 1 else f"{cpid}/{connector_id}"
+
 
 @dataclass
-class StationState:
-    """Everything the proxy knows about one charge point."""
+class ConnectorState:
+    """One plug of a charger and the session running on it."""
 
     cpid: str
+    connector_id: int
     status: StationStatus = StationStatus.AVAILABLE
-    authorized: bool = False
     transaction_id: Optional[int] = None
+    id_tag: Optional[str] = None           # card of the live session
+    stopped_at: Optional[float] = None     # when this plug's last transaction stopped (R3)
 
-    # uniqueId -> action, for correlating CALLRESULT back to its CALL.
-    pending: dict[str, str] = field(default_factory=dict)
-
-    # Telemetry / ML accumulators (populated later, kept here so one object
-    # carries a station's whole story).
+    # Session accumulators for the ML features and R6.
     session_start_ts: Optional[float] = None
     last_ts: Optional[float] = None
     last_power_kw: Optional[float] = None
@@ -47,7 +58,6 @@ class StationState:
     energy_register_start_kwh: Optional[float] = None
     # previous sample's residual, so R6 can read its current climb rate
     last_energy_residual_kwh: Optional[float] = None
-
     # kW of the last MeterValues, kept for the fleet grid aggregate.
     last_power_reported_kw: float = 0.0
 
@@ -57,10 +67,33 @@ class StationState:
     last_frequency_hz: Optional[float] = None
     last_electrical_ts: Optional[float] = None
 
-    # RFID card of the current session (from StartTransaction / Authorize).
-    id_tag: Optional[str] = None
-    # uniqueId of an in-flight StartTransaction -> idTag it carried.
-    pending_start_tag: dict[str, str] = field(default_factory=dict)
+    # Last TelemetryEvent broadcast for this plug, so a quarantine can re-publish
+    # every plug of the charger as Quarantined.
+    last_telemetry: Any = None
+
+    @property
+    def label(self) -> str:
+        return connector_label(self.cpid, self.connector_id)
+
+    @property
+    def session_live(self) -> bool:
+        """True from the CSMS-confirmed StartTransaction until StopTransaction."""
+        return self.transaction_id is not None
+
+    def begin_session(self, ts: float) -> None:
+        """A new transaction on this plug: the meter story starts over."""
+        self.session_start_ts = ts
+        self.last_ts = None
+        self.last_power_kw = None
+        self.energy_integral_kwh = 0.0
+        self.sample_count = 0
+        self.energy_register_start_kwh = None
+        self.last_energy_residual_kwh = None
+        self.last_power_reported_kw = 0.0
+        # The supply-side reading belongs to the session that just ended. Kept,
+        # it made a plug that had not reported yet look like it drew full power
+        # (0 kW to the car, 127 kVA from the transformer).
+        self.last_ac_power_kw = None
 
     def record_electrical(
         self,
@@ -74,15 +107,10 @@ class StationState:
         self.last_frequency_hz = frequency_hz
         self.last_electrical_ts = ts
 
-    @property
-    def session_live(self) -> bool:
-        """True once Authorize -> StartTransaction has completed and not stopped."""
-        return self.authorized and self.transaction_id is not None
-
     def record_meter_sample(
         self, power_kw: float, soc: float, energy_register_kwh: float, ts: float
     ) -> SessionFeatures:
-        """Fold one MeterValues into this station's accumulators; return features."""
+        """Fold one MeterValues into this plug's accumulators; return features."""
         f = compute_session_features(
             power_kw=power_kw,
             soc=soc,
@@ -107,18 +135,47 @@ class StationState:
 
 
 @dataclass
+class StationState:
+    """Everything the proxy knows about one charge point."""
+
+    cpid: str
+    # Charger-wide: AVAILABLE, or QUARANTINED once the proxy severs it.
+    status: StationStatus = StationStatus.AVAILABLE
+    # An Authorize was accepted. Informational only: Authorize names no
+    # connector, and OCPP lets chargers authorise from a local list without it.
+    authorized: bool = False
+
+    # uniqueId -> action, for correlating CALLRESULT back to its CALL.
+    pending: dict[str, str] = field(default_factory=dict)
+    # uniqueId of an in-flight StartTransaction -> (connectorId, idTag) it carried.
+    pending_start: dict[str, tuple[int, Optional[str]]] = field(default_factory=dict)
+    connectors: dict[int, ConnectorState] = field(default_factory=dict)
+
+    def connector(self, connector_id: int) -> ConnectorState:
+        c = self.connectors.get(connector_id)
+        if c is None:
+            c = ConnectorState(cpid=self.cpid, connector_id=connector_id)
+            self.connectors[connector_id] = c
+        return c
+
+    def plugs(self) -> Iterator[ConnectorState]:
+        """Every real connector (1..n), not the main meter."""
+        return (c for cid, c in sorted(self.connectors.items()) if cid != MAIN_METER)
+
+
+@dataclass
 class GridSnapshot:
     """Aggregate of the charging fleet, in the site's real units."""
 
     output_kw: float                 # DC delivered to vehicles
     input_kw: float                  # AC drawn from the transformer
-    active_stations: int
+    active_stations: int             # connectors charging a vehicle
     lt_voltage_v: Optional[float]    # mean measured inlet voltage, line-to-line
     frequency_hz: Optional[float]    # mean measured supply frequency
 
 
-# A station's voltage / frequency report counts toward the site figure only
-# while it is this fresh; a quarantined or idle bay stops reporting.
+# A voltage / frequency report counts toward the site figure only while it is
+# this fresh; a quarantined or idle plug stops reporting.
 ELECTRICAL_FRESH_SEC = 5.0
 
 
@@ -127,12 +184,12 @@ class ProxyState:
 
     def __init__(self) -> None:
         self.stations: dict[str, StationState] = {}
-        self.txn_owner: dict[int, str] = {}       # transactionId -> cpid  (R5)
-        self.live_tags: dict[str, str] = {}       # idTag -> cpid with a live session (R8)
-        self.live_connections: set[str] = set()   # cpids with an open socket (R4)
+        self.txn_owner: dict[int, tuple[str, int]] = {}  # transactionId -> (cpid, connector)  (R5)
+        self.live_tags: dict[str, tuple[str, int]] = {}  # idTag -> (cpid, connector) live (R8)
+        self.live_connections: set[str] = set()          # cpids with an open socket (R4)
         self.quarantined: set[str] = set()
-        # Called as (id_tag, cpid, live) when a card's session starts or ends;
-        # main.py points it at the federation link.
+        # Called as (id_tag, plug label, live) when a card's session starts or
+        # ends; main.py points it at the federation link.
         self.tag_listener: Optional[Callable[[str, str, bool], None]] = None
         # cpid -> uniqueId of the ChangeAvailability we sent, awaiting its ack
         self.quarantine_ack_pending: dict[str, str] = {}
@@ -146,33 +203,22 @@ class ProxyState:
         return st
 
     def reset_session(self, cpid: str) -> None:
-        """Clear a station's session FSM. A new socket is always a new session.
+        """Clear a charger's sessions. A new socket is always a new session.
 
         Without this the proxy keeps FSM state across a reconnect, so a station
         that reconnects mid-transaction (after an attack, or a dropped socket)
-        would trip R1 on every frame until it happened to re-authorise.
+        would trip R1 on every frame until its next StartTransaction.
         """
         st = self.station(cpid)
-        if st.transaction_id is not None:
-            self.txn_owner.pop(st.transaction_id, None)
-        self._release_tag(st)
+        for c in list(st.connectors.values()):
+            if c.transaction_id is not None:
+                self.txn_owner.pop(c.transaction_id, None)
+            self._release_tag(c)
+        st.connectors.clear()
         st.authorized = False
-        st.transaction_id = None
         st.status = StationStatus.AVAILABLE
         st.pending.clear()
-        st.pending_start_tag.clear()
-        st.last_ac_power_kw = None
-        st.last_ac_voltage_v = None
-        st.last_frequency_hz = None
-        st.last_electrical_ts = None
-        st.session_start_ts = None
-        st.last_ts = None
-        st.last_power_kw = None
-        st.last_power_reported_kw = 0.0
-        st.energy_integral_kwh = 0.0
-        st.sample_count = 0
-        st.energy_register_start_kwh = None
-        st.last_energy_residual_kwh = None
+        st.pending_start.clear()
 
     # ---- connection registry (R4) --------------------------------------
     def register_connection(self, cpid: str) -> bool:
@@ -195,50 +241,74 @@ class ProxyState:
 
     # ---- FSM transitions ------------------------------------------------
     def apply_authorize(self, cpid: str) -> None:
-        st = self.station(cpid)
-        st.authorized = True
-        st.status = StationStatus.PREPARING
+        self.station(cpid).authorized = True
 
     def apply_start_transaction(
-        self, cpid: str, transaction_id: int, id_tag: Optional[str] = None
-    ) -> None:
-        """Link a returned transactionId to its station (from the CALLRESULT)."""
-        st = self.station(cpid)
-        st.transaction_id = transaction_id
-        st.status = StationStatus.CHARGING
-        if st.session_start_ts is None:
-            st.session_start_ts = time.time()
-        self.txn_owner[transaction_id] = cpid
+        self,
+        cpid: str,
+        transaction_id: int,
+        connector_id: int = 1,
+        id_tag: Optional[str] = None,
+        now: Optional[float] = None,
+    ) -> ConnectorState:
+        """Link a CSMS-issued transactionId to its plug (from the CALLRESULT)."""
+        now = time.time() if now is None else now
+        c = self.station(cpid).connector(connector_id)
+        if c.transaction_id is not None:
+            self.txn_owner.pop(c.transaction_id, None)
+        self._release_tag(c)
+        c.transaction_id = transaction_id
+        c.status = StationStatus.CHARGING
+        c.begin_session(now)
+        self.txn_owner[transaction_id] = (cpid, connector_id)
         if id_tag:
-            self._release_tag(st)
-            st.id_tag = id_tag
-            self.live_tags[id_tag] = cpid
+            c.id_tag = id_tag
+            self.live_tags[id_tag] = (cpid, connector_id)
             if self.tag_listener is not None:
-                self.tag_listener(id_tag, cpid, True)
+                self.tag_listener(id_tag, c.label, True)
+        return c
 
-    def apply_stop_transaction(self, cpid: str) -> None:
-        st = self.station(cpid)
-        if st.transaction_id is not None:
-            self.txn_owner.pop(st.transaction_id, None)
-        self._release_tag(st)
-        st.transaction_id = None
-        st.authorized = False
-        st.status = StationStatus.FINISHING
+    def connector_for_txn(self, cpid: str, transaction_id: Optional[int]) -> Optional[ConnectorState]:
+        """The plug of *this* charger running that transaction, if any."""
+        owner = self.txn_owner.get(transaction_id) if transaction_id is not None else None
+        if owner is None or owner[0] != cpid:
+            return None
+        return self.station(cpid).connector(owner[1])
+
+    def apply_stop_transaction(
+        self, cpid: str, transaction_id: Optional[int], now: Optional[float] = None
+    ) -> Optional[ConnectorState]:
+        """End the session the transaction belongs to; other plugs keep charging."""
+        c = self.connector_for_txn(cpid, transaction_id)
+        if c is None:
+            return None
+        self.txn_owner.pop(c.transaction_id, None)
+        self._release_tag(c)
+        c.transaction_id = None
+        c.status = StationStatus.FINISHING
+        c.stopped_at = time.time() if now is None else now
+        return c
 
     # ---- RFID card registry (R8) ----------------------------------------
-    def _release_tag(self, st: StationState) -> None:
-        if st.id_tag is not None and self.live_tags.get(st.id_tag) == st.cpid:
-            self.live_tags.pop(st.id_tag, None)
+    def _release_tag(self, c: ConnectorState) -> None:
+        if c.id_tag is not None and self.live_tags.get(c.id_tag) == (c.cpid, c.connector_id):
+            self.live_tags.pop(c.id_tag, None)
             if self.tag_listener is not None:
-                self.tag_listener(st.id_tag, st.cpid, False)
-        st.id_tag = None
+                self.tag_listener(c.id_tag, c.label, False)
+        c.id_tag = None
 
     def live_sessions(self) -> list[tuple[str, str]]:
-        """(id_tag, cpid) for every card with a live session at this site."""
-        return list(self.live_tags.items())
+        """(id_tag, plug label) for every card with a live session at this site."""
+        return [(tag, connector_label(cpid, cid)) for tag, (cpid, cid) in self.live_tags.items()]
+
+    def live_cards(self) -> list[tuple[str, str, int]]:
+        """(id_tag, cpid, connector) for every card with a live session at this site."""
+        return [(tag, cpid, cid) for tag, (cpid, cid) in self.live_tags.items()]
 
     def tag_owner(self, id_tag: str) -> Optional[str]:
-        return self.live_tags.get(id_tag)
+        """Charger currently charging on this card, if any."""
+        owner = self.live_tags.get(id_tag)
+        return owner[0] if owner else None
 
     # ---- quarantine -----------------------------------------------------
     def quarantine(self, cpid: str) -> None:
@@ -259,11 +329,12 @@ class ProxyState:
 
     # ---- transformer / grid aggregate (CONTEXT.md §5.C, [FIX-12]) --------
     def grid(self, now: Optional[float] = None) -> GridSnapshot:
-        """Fleet aggregate across the live, charging stations.
+        """Fleet aggregate across every charging plug.
 
-        A quarantined station draws nothing, so it drops out. Supply-side power
-        is the charger's own Inlet reading when it reports one; otherwise it is
-        derived from the DC output and the charger efficiency.
+        A quarantined charger draws nothing, so all its plugs drop out.
+        Supply-side power is the plug's own Inlet reading when it reports one;
+        otherwise it is derived from the DC output and the charger efficiency.
+        Bus voltage and frequency also come from main-meter (connector 0) reports.
         """
         now = time.time() if now is None else now
         output = 0.0
@@ -272,17 +343,20 @@ class ProxyState:
         volts: list[float] = []
         hertz: list[float] = []
         for st in self.stations.values():
-            if st.status == StationStatus.CHARGING and st.cpid not in self.quarantined:
-                out_kw = max(0.0, st.last_power_reported_kw)
-                output += out_kw
-                supply += st.last_ac_power_kw if st.last_ac_power_kw is not None else ac_input_kw(out_kw)
-                active += 1
-            fresh = st.last_electrical_ts is not None and now - st.last_electrical_ts <= ELECTRICAL_FRESH_SEC
-            if fresh and st.cpid not in self.quarantined:
-                if st.last_ac_voltage_v is not None:
-                    volts.append(st.last_ac_voltage_v)
-                if st.last_frequency_hz is not None:
-                    hertz.append(st.last_frequency_hz)
+            if st.cpid in self.quarantined:
+                continue
+            for c in st.connectors.values():
+                if c.connector_id != MAIN_METER and c.status == StationStatus.CHARGING:
+                    out_kw = max(0.0, c.last_power_reported_kw)
+                    output += out_kw
+                    supply += c.last_ac_power_kw if c.last_ac_power_kw is not None else ac_input_kw(out_kw)
+                    active += 1
+                fresh = c.last_electrical_ts is not None and now - c.last_electrical_ts <= ELECTRICAL_FRESH_SEC
+                if fresh:
+                    if c.last_ac_voltage_v is not None:
+                        volts.append(c.last_ac_voltage_v)
+                    if c.last_frequency_hz is not None:
+                        hertz.append(c.last_frequency_hz)
         return GridSnapshot(
             output_kw=output,
             input_kw=supply,
