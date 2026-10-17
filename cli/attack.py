@@ -17,8 +17,13 @@ PROXY_INGRESS_URL = "ws://localhost:8000/ocpp"
 console = Console()
 
 
-async def send_trigger(trigger: AttackTrigger, control_url: str = CONTROL_URL) -> ControlAck:
-    """Send an AttackTrigger over the twin control channel."""
+async def send_trigger(trigger: AttackTrigger, control_url: str = CONTROL_URL, dry_run: bool = False) -> ControlAck:
+    """Send an AttackTrigger over the twin control channel, or preview if dry_run=True."""
+    if dry_run:
+        payload = trigger.model_dump()
+        console.print(f"[bold cyan][dry-run][/bold cyan] Would dispatch trigger to [yellow]{control_url}[/yellow]: {payload}")
+        return ControlAck(ok=True, detail=f"Dry-run simulated trigger: {trigger.attack_type.value}")
+
     try:
         async with websockets.connect(control_url) as ws:
             await ws.send(trigger.model_dump_json())
@@ -29,13 +34,17 @@ async def send_trigger(trigger: AttackTrigger, control_url: str = CONTROL_URL) -
         return ControlAck(ok=False, detail=f"Failed to connect to control channel: {e}")
 
 
-async def execute_session_shadow(station_id: str = "CP-01", base_url: str = PROXY_INGRESS_URL) -> ControlAck:
+async def execute_session_shadow(station_id: str = "CP-01", base_url: str = PROXY_INGRESS_URL, dry_run: bool = False) -> ControlAck:
     """
     Session Shadowing Attack:
     Opens a rogue, duplicate WebSocket connection to the proxy (:8000)
     using an already-active chargePointId.
     """
     target_url = f"{base_url}/{station_id}"
+    if dry_run:
+        console.print(f"[bold cyan][dry-run][/bold cyan] Would initiate rogue socket connection to [yellow]{target_url}[/yellow]")
+        return ControlAck(ok=True, detail=f"Dry-run simulated rogue handshake to {target_url}")
+
     console.print(f"[bold red][cli] Initiating rogue socket connection to {target_url}...[/bold red]")
     try:
         async with websockets.connect(target_url) as ws:
@@ -130,7 +139,8 @@ async def run_interactive_tui():
 @click.option("--tag", "-t", default=None, help="Card to clone for attack 5 (e.g. TAG-CP-03)")
 @click.option("--control-url", default=CONTROL_URL, show_default=True, help="Twin control channel of the target site")
 @click.option("--proxy-url", default=PROXY_INGRESS_URL, show_default=True, help="Proxy OCPP ingress of the target site (attack 3)")
-def main(attack: Optional[str], station: Optional[str], tag: Optional[str], control_url: str, proxy_url: str):
+@click.option("--dry-run", is_flag=True, default=False, help="Simulate trigger and inspect payload without sending over network")
+def main(attack: Optional[str], station: Optional[str], tag: Optional[str], control_url: str, proxy_url: str, dry_run: bool):
     """VoltSentry Red-Team CLI exploit launcher."""
     global CONTROL_URL, PROXY_INGRESS_URL
     CONTROL_URL, PROXY_INGRESS_URL = control_url, proxy_url
@@ -138,22 +148,22 @@ def main(attack: Optional[str], station: Optional[str], tag: Optional[str], cont
         # Non-interactive single command mode
         if attack == "1":
             trigger = AttackTrigger(attack_type=AttackType.METER_SPOOF, station_id=station or "CP-03")
-            ack = asyncio.run(send_trigger(trigger, control_url))
+            ack = asyncio.run(send_trigger(trigger, control_url, dry_run=dry_run))
         elif attack == "2":
             trigger = AttackTrigger(attack_type=AttackType.FLEET_OSCILLATE, station_id=station)
-            ack = asyncio.run(send_trigger(trigger, control_url))
+            ack = asyncio.run(send_trigger(trigger, control_url, dry_run=dry_run))
         elif attack == "3":
-            ack = asyncio.run(execute_session_shadow(station_id=station or "CP-01", base_url=proxy_url))
+            ack = asyncio.run(execute_session_shadow(station_id=station or "CP-01", base_url=proxy_url, dry_run=dry_run))
         elif attack == "4":
             trigger = AttackTrigger(attack_type=AttackType.SUBTLE_DRIFT, station_id=station or "CP-02")
-            ack = asyncio.run(send_trigger(trigger, control_url))
+            ack = asyncio.run(send_trigger(trigger, control_url, dry_run=dry_run))
         elif attack == "5":
             trigger = AttackTrigger(attack_type=AttackType.TAG_CLONE, station_id=station or "CP-05",
                                     params={"id_tag": tag or "TAG-CP-03"})
-            ack = asyncio.run(send_trigger(trigger, control_url))
+            ack = asyncio.run(send_trigger(trigger, control_url, dry_run=dry_run))
         elif attack == "r":
             trigger = AttackTrigger(attack_type=AttackType.RESET)
-            ack = asyncio.run(send_trigger(trigger, control_url))
+            ack = asyncio.run(send_trigger(trigger, control_url, dry_run=dry_run))
         console.print(f"[cli] Ack: ok={ack.ok} detail={ack.detail}")
     else:
         # Interactive TUI mode
