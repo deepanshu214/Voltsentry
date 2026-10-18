@@ -319,3 +319,36 @@ def test_terminal_voltage_never_exceeds_max_charge_voltage_across_a_session():
 def test_idle_pack_draws_no_current():
     v, i = terminal_voltage_current(0.0, 55.0)
     assert i == 0.0 and v == pytest.approx(open_circuit_voltage_v(55.0))
+
+
+def test_open_circuit_voltage_out_of_bounds_clamping():
+    """Verify OCV clamps cleanly when input SoC is outside [0, 100]."""
+    v_neg = open_circuit_voltage_v(-15.0)
+    v_zero = open_circuit_voltage_v(0.0)
+    assert v_neg == pytest.approx(v_zero)
+
+    v_over = open_circuit_voltage_v(125.0)
+    v_hundred = open_circuit_voltage_v(100.0)
+    assert v_over == pytest.approx(v_hundred)
+
+
+def test_terminal_voltage_negative_power_clamped():
+    """Negative power should be clamped to 0.0 W and draw 0 A."""
+    v_neg, i_neg = terminal_voltage_current(-50.0, 50.0)
+    v_zero, i_zero = terminal_voltage_current(0.0, 50.0)
+    assert i_neg == 0.0
+    assert v_neg == pytest.approx(v_zero)
+
+
+@pytest.mark.asyncio
+async def test_dry_run_attack_triggers():
+    """Verify dry-run mode in attack launcher executes cleanly without sockets."""
+    from cli.attack import send_trigger, execute_session_shadow
+    trigger = AttackTrigger(attack_type=AttackType.METER_SPOOF, station_id="CP-03")
+    ack = await send_trigger(trigger, dry_run=True)
+    assert ack.ok is True
+    assert "Dry-run simulated trigger" in ack.detail
+
+    shadow_ack = await execute_session_shadow(station_id="CP-01", dry_run=True)
+    assert shadow_ack.ok is True
+    assert "Dry-run" in shadow_ack.detail
