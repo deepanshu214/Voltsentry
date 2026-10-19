@@ -95,3 +95,18 @@ class Battery:
         self.soc = min(100.0, self.soc + delta_soc)
 
         return current_power, self.soc, self.energy_kwh
+
+    def get_telemetry(self) -> dict[str, float]:
+        """Compute instantaneous cell-level diagnostics and thermodynamic loss."""
+        cell_v = self.voltage_v / CELLS_IN_SERIES if CELLS_IN_SERIES > 0 else 0.0
+        # Joule heating dissipation: P_loss = I^2 * R (in kW)
+        joule_loss_kw = ((self.current_a ** 2) * PACK_RESISTANCE_OHM) / 1000.0
+        c_rate = (self.power_kw / self.capacity_kwh) if self.capacity_kwh > 0 else 0.0
+        rem_energy_kwh = max(0.0, (self.target_soc - self.soc) / 100.0 * self.capacity_kwh)
+        est_sec = (rem_energy_kwh / self.power_kw * 3600.0) if self.power_kw > 0.1 else 0.0
+        return {
+            "cell_voltage_v": round(cell_v, 3),
+            "pack_loss_kw": round(joule_loss_kw, 3),
+            "c_rate": round(c_rate, 2),
+            "estimated_remaining_sec": round(est_sec, 1),
+        }
