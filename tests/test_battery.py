@@ -352,3 +352,39 @@ async def test_dry_run_attack_triggers():
     shadow_ack = await execute_session_shadow(station_id="CP-01", dry_run=True)
     assert shadow_ack.ok is True
     assert "Dry-run" in shadow_ack.detail
+
+
+def test_battery_telemetry_metrics():
+    """Verify Battery.get_telemetry returns realistic cell voltages and losses."""
+    battery = Battery(initial_soc=20.0, max_power_kw=120.0)
+    battery.tick(1.0)
+    telem = battery.get_telemetry()
+
+    assert 3.3 <= telem["cell_voltage_v"] <= 4.25
+    assert telem["pack_loss_kw"] > 0.0
+    assert telem["c_rate"] > 0.0
+    assert telem["estimated_remaining_sec"] > 0.0
+
+
+def test_battery_telemetry_at_full_soc():
+    """When battery is fully charged, loss and c-rate drop to zero."""
+    battery = Battery(initial_soc=100.0)
+    battery.tick(1.0)
+    telem = battery.get_telemetry()
+
+    assert telem["pack_loss_kw"] == 0.0
+    assert telem["c_rate"] == 0.0
+    assert telem["estimated_remaining_sec"] == 0.0
+
+
+def test_battery_telemetry_loss_scales_with_current():
+    """Joule heating loss (I^2 * R) is strictly higher at full charging power."""
+    b_low = Battery(initial_soc=30.0, max_power_kw=40.0)
+    b_low.tick(1.0)
+    loss_low = b_low.get_telemetry()["pack_loss_kw"]
+
+    b_high = Battery(initial_soc=30.0, max_power_kw=120.0)
+    b_high.tick(1.0)
+    loss_high = b_high.get_telemetry()["pack_loss_kw"]
+
+    assert loss_high > loss_low
