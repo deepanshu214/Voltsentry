@@ -662,9 +662,28 @@ class FleetManager:
                     c.new_car(c.initial_soc)
                 if loop is not None:
                     loop.create_task(s.force_reconnect())
-            return ControlAck(ok=True, detail="All stations reset to clean mode")
+            return ControlAck(ok=True, detail=f"All {len(self.stations)} stations reset to clean mode")
 
         return ControlAck(ok=False, detail=f"Unhandled attack type: {trigger.attack_type}")
+
+    def get_fleet_summary(self) -> dict:
+        """Return an aggregated snapshot of fleet charging states and quarantine status."""
+        total_power = sum(s.battery.power_kw for s in self.stations.values())
+        avg_soc = (
+            sum(s.battery.soc for s in self.stations.values()) / len(self.stations)
+            if self.stations
+            else 0.0
+        )
+        quarantined = [s.cpid for s in self.stations.values() if s.is_quarantined]
+        modes = {s.cpid: s.mode for s in self.stations.values() if s.mode != "clean"}
+        return {
+            "total_stations": len(self.stations),
+            "total_power_kw": round(total_power, 2),
+            "avg_soc": round(avg_soc, 2),
+            "quarantined_count": len(quarantined),
+            "quarantined_stations": quarantined,
+            "active_attacks": modes,
+        }
 
     async def control_handler(self, websocket) -> None:
         """Handle incoming control commands on ws://localhost:9100/control."""
