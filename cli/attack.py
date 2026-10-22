@@ -64,6 +64,55 @@ async def execute_session_shadow(station_id: str = "CP-01", base_url: str = PROX
         return ControlAck(ok=False, detail=f"Shadow attack error: {e}")
 
 
+ATTACK_VECTORS = [
+    {
+        "key": "1",
+        "name": "Meter Spoof",
+        "target": "CP-03",
+        "type": AttackType.METER_SPOOF.value,
+        "rule": "R7_ELECTRICAL",
+        "description": "Reports 5 kW; physical V x A pack readings show ~120 kW.",
+    },
+    {
+        "key": "2",
+        "name": "Fleet Oscillate",
+        "target": "Fleet-wide",
+        "type": AttackType.FLEET_OSCILLATE.value,
+        "rule": "R3_OSCILLATION",
+        "description": "1 Hz rapid Start/Stop cycles across fleet to induce grid frequency swings.",
+    },
+    {
+        "key": "3",
+        "name": "Session Shadow",
+        "target": "CP-01 (:8000)",
+        "type": "session_shadow",
+        "rule": "R4_SESSION_UNIQUE",
+        "description": "Rogue duplicate WebSocket connection using an already-active station CPID.",
+    },
+    {
+        "key": "4",
+        "name": "Subtle Drift",
+        "target": "CP-02",
+        "type": AttackType.SUBTLE_DRIFT.value,
+        "rule": "ML_ANOMALY",
+        "description": "Compounding -2% power decay per tick designed to slip past static rules.",
+    },
+    {
+        "key": "5",
+        "name": "Card Clone",
+        "target": "--station + --tag",
+        "type": AttackType.TAG_CLONE.value,
+        "rule": "R8_TAG_CLONE",
+        "description": "One RFID card identity presented simultaneously at two bays or federated sites.",
+    },
+]
+
+
+def get_attack_matrix() -> list[dict]:
+    """Return structured list of red-team attack vectors for audit reporting."""
+    return [dict(v) for v in ATTACK_VECTORS]
+
+
 def display_menu():
     table = Table(title="⚡ VoltSentry Red-Team Exploit Suite ⚡", show_header=True, header_style="bold magenta")
     table.add_column("Key", style="bold cyan", width=6, justify="center")
@@ -71,11 +120,8 @@ def display_menu():
     table.add_column("Target", style="green", width=14)
     table.add_column("Expected Detection Rule / Mechanism", style="yellow")
 
-    table.add_row("1", "Meter Spoof", "CP-03", "R7_ELECTRICAL (reports 5 kW; its own V x A says ~120 kW)")
-    table.add_row("2", "Fleet Oscillate", "Fleet-wide", "R3_OSCILLATION (1 Hz rapid Start/Stop cycles)")
-    table.add_row("3", "Session Shadow", "CP-01 (:8000)", "R4_SESSION_UNIQUE (Rogue duplicate handshake)")
-    table.add_row("4", "Subtle Drift", "CP-02", "ML Anomaly (compounding -2% power decay/tick)")
-    table.add_row("5", "Card Clone", "--station + --tag", "R8_TAG_CLONE (one RFID card live at two bays/sites)")
+    for v in ATTACK_VECTORS:
+        table.add_row(v["key"], v["name"], v["target"], f"{v['rule']} ({v['description']})")
     table.add_row("r", "Fleet Reset", "All Stations", "Clears quarantine & resets to clean mode")
     table.add_row("q", "Quit", "-", "Exit Red-Team CLI")
 
@@ -140,10 +186,14 @@ async def run_interactive_tui():
 @click.option("--control-url", default=CONTROL_URL, show_default=True, help="Twin control channel of the target site")
 @click.option("--proxy-url", default=PROXY_INGRESS_URL, show_default=True, help="Proxy OCPP ingress of the target site (attack 3)")
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate trigger and inspect payload without sending over network")
-def main(attack: Optional[str], station: Optional[str], tag: Optional[str], control_url: str, proxy_url: str, dry_run: bool):
+@click.option("--matrix", "-m", is_flag=True, default=False, help="Output attack vectors as JSON for audit reporting")
+def main(attack: Optional[str], station: Optional[str], tag: Optional[str], control_url: str, proxy_url: str, dry_run: bool, matrix: bool):
     """VoltSentry Red-Team CLI exploit launcher."""
     global CONTROL_URL, PROXY_INGRESS_URL
     CONTROL_URL, PROXY_INGRESS_URL = control_url, proxy_url
+    if matrix:
+        console.print_json(json.dumps(get_attack_matrix()))
+        return
     if attack:
         # Non-interactive single command mode
         if attack == "1":
