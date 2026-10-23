@@ -388,3 +388,51 @@ def test_battery_telemetry_loss_scales_with_current():
     loss_high = b_high.get_telemetry()["pack_loss_kw"]
 
     assert loss_high > loss_low
+
+
+def test_get_attack_matrix_structure():
+    """Verify attack matrix contains all five vectors and expected schemas."""
+    from cli.attack import get_attack_matrix
+    matrix = get_attack_matrix()
+    assert len(matrix) >= 5
+    keys = {m["key"] for m in matrix}
+    assert {"1", "2", "3", "4", "5"}.issubset(keys)
+
+    for item in matrix:
+        assert all(k in item for k in ("name", "target", "type", "rule", "description"))
+
+
+def test_fleet_manager_summary_aggregation():
+    """Verify FleetManager.get_fleet_summary aggregates metrics and flags attacks."""
+    fleet = FleetManager(base_url="ws://localhost:8000", station_count=4)
+    summary = fleet.get_fleet_summary()
+
+    assert summary["total_stations"] == 4
+    assert summary["total_power_kw"] > 0.0
+    assert 0.0 < summary["avg_soc"] < 100.0
+    assert summary["quarantined_count"] == 0
+    assert summary["active_attacks"] == {}
+
+    # Trigger attack & quarantine
+    fleet.stations["CP-01"].is_quarantined = True
+    fleet.stations["CP-02"].mode = "meter_spoof"
+    updated_summary = fleet.get_fleet_summary()
+
+    assert updated_summary["quarantined_count"] == 1
+    assert "CP-01" in updated_summary["quarantined_stations"]
+    assert updated_summary["active_attacks"] == {"CP-02": "meter_spoof"}
+
+
+def test_fleet_reset_reporting():
+    """Verify FleetManager reset trigger restores fleet cleanly and reports bay count."""
+    fleet = FleetManager(base_url="ws://localhost:8000", station_count=4)
+    fleet.stations["CP-01"].is_quarantined = True
+    fleet.stations["CP-02"].mode = "subtle_drift"
+
+    ack = fleet.apply_trigger(AttackTrigger(attack_type=AttackType.RESET))
+    assert ack.ok is True
+    assert "All 4 stations reset" in ack.detail
+
+    summary = fleet.get_fleet_summary()
+    assert summary["quarantined_count"] == 0
+    assert summary["active_attacks"] == {}
